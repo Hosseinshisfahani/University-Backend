@@ -8,9 +8,11 @@ Usage:
 
 from __future__ import annotations
 
+from datetime import date
 from datetime import time, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core.management.base import BaseCommand
@@ -29,13 +31,18 @@ from apps.institutes.psy_institute.models import (
     PsychometricResponse,
     SessionNote,
     SessionType,
+    SitePage,
     TherapistAvailability,
     TherapistProfile,
     TherapistSessionOffer,
+    Ticket,
+    TicketMessage,
     Workshop,
+    WorkshopCertificate,
     WorkshopEnrollment,
     WorkshopResource,
     WorkshopSession,
+    WorkshopSessionProgress,
 )
 from apps.institutes.psy_institute.services import regenerate_slots_for_therapist
 
@@ -80,6 +87,8 @@ PATIENT_SEEDS = (
         "last_name": "احمدی",
         "phone": "09121110001",
         "national_id": "0010000001",
+        "birth_date": date(2002, 5, 12),
+        "notes_internal": "دانشجوی کارشناسی؛ اضطراب امتحان و مشکل خواب در فصل امتحانات.",
     },
     {
         "username": "patient2",
@@ -87,6 +96,8 @@ PATIENT_SEEDS = (
         "last_name": "محمدی",
         "phone": "09121110002",
         "national_id": "0010000002",
+        "birth_date": date(1999, 11, 3),
+        "notes_internal": "دانشجوی ارشد؛ مراجعه برای افت انگیزه و برنامه‌ریزی تحصیلی.",
     },
     {
         "username": "patient3",
@@ -94,6 +105,69 @@ PATIENT_SEEDS = (
         "last_name": "کریمی",
         "phone": "09121110003",
         "national_id": "0010000003",
+        "birth_date": date(2001, 2, 20),
+        "notes_internal": "مراجعه جهت مهارت‌های ارتباطی و مدیریت تعارض.",
+    },
+    {
+        "username": "patient4",
+        "first_name": "امیر",
+        "last_name": "مرادی",
+        "phone": "09121110004",
+        "national_id": "0010000004",
+        "birth_date": date(2000, 8, 8),
+        "notes_internal": "پیگیری برای فرسودگی تحصیلی و تعادل کار و درس.",
+    },
+    {
+        "username": "patient5",
+        "first_name": "نگار",
+        "last_name": "صالحی",
+        "phone": "09121110005",
+        "national_id": "0010000005",
+        "birth_date": date(2003, 1, 15),
+        "notes_internal": "نیاز به مشاوره اولیه درباره سازگاری با محیط دانشگاه.",
+    },
+)
+
+THERAPIST_SEEDS = (
+    {
+        "username": "therapist1",
+        "first_name": "دکتر",
+        "last_name": "نمونه",
+        "display_name": "دکتر نمونه",
+        "bio": "روان‌شناس بالینی؛ داده آزمایشی برای توسعه پورتال بیمار.",
+        "specialties": ["اضطراب", "افسردگی", "مهارت‌های مقابله‌ای"],
+        "is_accepting_patients": True,
+        "is_active": True,
+        "availability": (
+            (0, time(9, 0), time(14, 0)),
+            (1, time(9, 0), time(14, 0)),
+            (2, time(9, 0), time(14, 0)),
+        ),
+    },
+    {
+        "username": "therapist2",
+        "first_name": "دکتر",
+        "last_name": "کاوه",
+        "display_name": "دکتر لیلا کاوه",
+        "bio": "درمانگر خانواده و روابط بین‌فردی؛ مناسب تست جستجو، فیلتر فعال و ظرفیت پذیرش.",
+        "specialties": ["روابط", "خانواده", "ذهن‌آگاهی"],
+        "is_accepting_patients": True,
+        "is_active": True,
+        "availability": (
+            (3, time(10, 0), time(15, 0)),
+            (5, time(8, 30), time(12, 30)),
+        ),
+    },
+    {
+        "username": "therapist3",
+        "first_name": "دکتر",
+        "last_name": "نادری",
+        "display_name": "دکتر پیمان نادری",
+        "bio": "پروفایل غیرفعال برای تست فیلترها و نمایش درمانگران سابق مرکز.",
+        "specialties": ["روان‌سنجی", "مشاوره تحصیلی"],
+        "is_accepting_patients": False,
+        "is_active": False,
+        "availability": (),
     },
 )
 
@@ -101,6 +175,45 @@ MEET_LINKS = (
     "https://meet.google.com/abc-defg-hij",
     "https://meet.google.com/klm-nopq-rst",
 )
+
+MEDIA_FIXTURES = {
+    "psy/workshops/anxiety-skills-paid.svg": {
+        "title": "کارگاه مهارت‌های اضطراب",
+        "subtitle": "تمرین تنفس، بازسازی شناختی، مواجهه تدریجی",
+        "from": "#0f766e",
+        "to": "#14b8a6",
+    },
+    "psy/workshops/mindfulness-free.svg": {
+        "title": "کارگاه ذهن‌آگاهی",
+        "subtitle": "شروعی آرام برای حضور در لحظه",
+        "from": "#4f46e5",
+        "to": "#8b5cf6",
+    },
+    "psy/workshops/group-therapy-draft.svg": {
+        "title": "گروه درمانی",
+        "subtitle": "پیش‌نویس محتوای گروهی مرکز",
+        "from": "#334155",
+        "to": "#64748b",
+    },
+    "psy/blog/anxiety-breathing-basics.svg": {
+        "title": "تنفس آگاهانه",
+        "subtitle": "راهنمای کوتاه مدیریت اضطراب",
+        "from": "#0891b2",
+        "to": "#22d3ee",
+    },
+    "psy/blog/when-to-see-a-therapist.svg": {
+        "title": "زمان مراجعه",
+        "subtitle": "چه وقتی کمک حرفه‌ای بگیریم؟",
+        "from": "#7c3aed",
+        "to": "#c084fc",
+    },
+    "psy/blog/sleep-hygiene-draft.svg": {
+        "title": "بهداشت خواب",
+        "subtitle": "پیش‌نویس مقاله آموزشی",
+        "from": "#1e293b",
+        "to": "#475569",
+    },
+}
 
 
 class Command(BaseCommand):
@@ -134,25 +247,31 @@ class Command(BaseCommand):
         for name in ("psy_admin", "psy_therapist", "psy_patient"):
             Group.objects.get_or_create(name=name)
 
+        media_paths = self._ensure_media_fixtures()
         admin_user = self._user("admin1", password, "psy_admin", is_staff=True)
-        therapist_user = self._user(
-            "therapist1",
-            password,
-            "psy_therapist",
-            first_name="دکتر",
-            last_name="نمونه",
-        )
 
-        therapist, _ = TherapistProfile.objects.get_or_create(
-            user=therapist_user,
-            defaults={
-                "display_name": "دکتر نمونه",
-                "bio": "روان‌شناس بالینی — داده آزمایشی برای توسعه پورتال بیمار.",
-                "specialties": ["اضطراب", "افسردگی"],
-                "is_accepting_patients": True,
-                "is_active": True,
-            },
-        )
+        therapists: list[TherapistProfile] = []
+        for seed in THERAPIST_SEEDS:
+            therapist_user = self._user(
+                seed["username"],
+                password,
+                "psy_therapist",
+                first_name=seed["first_name"],
+                last_name=seed["last_name"],
+            )
+            therapist, _ = TherapistProfile.objects.update_or_create(
+                user=therapist_user,
+                defaults={
+                    "display_name": seed["display_name"],
+                    "bio": seed["bio"],
+                    "specialties": seed["specialties"],
+                    "is_accepting_patients": seed["is_accepting_patients"],
+                    "is_active": seed["is_active"],
+                },
+            )
+            therapists.append(therapist)
+
+        therapist = therapists[0]
 
         patients: list[PatientProfile] = []
         for seed in PATIENT_SEEDS:
@@ -168,17 +287,30 @@ class Command(BaseCommand):
                 defaults={
                     "phone": seed["phone"],
                     "national_id": seed["national_id"],
+                    "birth_date": seed["birth_date"],
+                    "notes_internal": seed["notes_internal"],
                 },
             )
             updated = False
+            update_fields = []
             if not patient.phone:
                 patient.phone = seed["phone"]
                 updated = True
+                update_fields.append("phone")
             if not patient.national_id:
                 patient.national_id = seed["national_id"]
                 updated = True
+                update_fields.append("national_id")
+            if not patient.birth_date:
+                patient.birth_date = seed["birth_date"]
+                updated = True
+                update_fields.append("birth_date")
+            if not patient.notes_internal:
+                patient.notes_internal = seed["notes_internal"]
+                updated = True
+                update_fields.append("notes_internal")
             if updated:
-                patient.save(update_fields=["phone", "national_id", "updated_at"])
+                patient.save(update_fields=[*update_fields, "updated_at"])
             patients.append(patient)
 
         session_type, _ = SessionType.objects.get_or_create(
@@ -193,32 +325,61 @@ class Command(BaseCommand):
                 "sort_order": 1,
             },
         )
-
-        TherapistSessionOffer.objects.get_or_create(
-            therapist=therapist,
-            session_type=session_type,
-            defaults={"is_active": True},
+        in_person_type, _ = SessionType.objects.get_or_create(
+            slug="in-person-60",
+            defaults={
+                "name": "حضوری ۶۰ دقیقه",
+                "modality": SessionType.Modality.IN_PERSON,
+                "duration_minutes": 60,
+                "price": Decimal("700000"),
+                "buffer_minutes": 15,
+                "is_active": True,
+                "sort_order": 2,
+            },
         )
+        intake_type, _ = SessionType.objects.get_or_create(
+            slug="online-intake-30",
+            defaults={
+                "name": "ارزیابی اولیه آنلاین ۳۰ دقیقه",
+                "modality": SessionType.Modality.ONLINE,
+                "duration_minutes": 30,
+                "price": Decimal("250000"),
+                "buffer_minutes": 10,
+                "is_active": True,
+                "sort_order": 0,
+            },
+        )
+
+        for active_therapist in therapists[:2]:
+            for offered_type in (session_type, in_person_type, intake_type):
+                TherapistSessionOffer.objects.get_or_create(
+                    therapist=active_therapist,
+                    session_type=offered_type,
+                    defaults={"is_active": True},
+                )
 
         today = timezone.localdate()
-        for weekday in (0, 1, 2):  # Mon–Wed
-            TherapistAvailability.objects.get_or_create(
-                therapist=therapist,
-                weekday=weekday,
-                start_time=time(9, 0),
-                end_time=time(14, 0),
-                valid_from=today,
-                defaults={
-                    "timezone": "Asia/Tehran",
-                    "is_active": True,
-                },
-            )
+        for active_therapist, seed in zip(therapists, THERAPIST_SEEDS, strict=False):
+            for weekday, start_time, end_time in seed["availability"]:
+                TherapistAvailability.objects.get_or_create(
+                    therapist=active_therapist,
+                    weekday=weekday,
+                    defaults={
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "valid_from": today,
+                        "timezone": "Asia/Tehran",
+                        "is_active": True,
+                    },
+                )
 
-        created_slots = regenerate_slots_for_therapist(
-            therapist=therapist,
-            range_start=today,
-            range_end=today + timedelta(days=14),
-        )
+        created_slots = 0
+        for active_therapist in therapists[:2]:
+            created_slots += regenerate_slots_for_therapist(
+                therapist=active_therapist,
+                range_start=today,
+                range_end=today + timedelta(days=14),
+            )
 
         LeaveRequest.objects.get_or_create(
             therapist=therapist,
@@ -258,12 +419,17 @@ class Command(BaseCommand):
                 )
 
         appointments = self._seed_appointments(therapist, session_type, patients)
+        appointments += self._seed_appointment_history(
+            therapist, in_person_type, patients
+        )
         notes_created = self._seed_session_notes(therapist, appointments)
         responses_created = self._seed_psychometric_responses(
             form, therapist, patients
         )
-        workshops_info = self._seed_workshops(therapist, patients[0])
-        blog_info = self._seed_blog(therapist.user, admin_user)
+        workshops_info = self._seed_workshops(therapist, patients, media_paths)
+        blog_info = self._seed_blog(therapist.user, admin_user, media_paths)
+        tickets_info = self._seed_tickets(admin_user, patients)
+        site_info = self._seed_site_pages(media_paths)
 
         with_meet = sum(1 for a in appointments if a.meeting_link)
         shared_notes = SessionNote.objects.filter(
@@ -272,7 +438,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS("psy seed complete"))
         self.stdout.write(
-            f"  admin1 / therapist1 / patient1–3  password={password}"
+            f"  admin1 / therapist1–3 / patient1–5  password={password}"
         )
         self.stdout.write(
             f"  session_type=online-45  slots_created≈{created_slots}"
@@ -288,7 +454,35 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"  workshops={workshops_info}")
         self.stdout.write(f"  blog={blog_info}")
+        self.stdout.write(f"  tickets={tickets_info}")
+        self.stdout.write(f"  site_pages={site_info}")
         self.stdout.write(f"  wallet_credit={credit_wallet}")
+
+    def _ensure_media_fixtures(self) -> dict[str, str]:
+        """Create small deterministic SVG media files used by seeded content."""
+        paths: dict[str, str] = {}
+        for relative_path, spec in MEDIA_FIXTURES.items():
+            file_path = settings.MEDIA_ROOT / relative_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="{spec["title"]}">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="{spec["from"]}"/>
+      <stop offset="100%" stop-color="{spec["to"]}"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" rx="44" fill="url(#bg)"/>
+  <circle cx="1040" cy="120" r="190" fill="rgba(255,255,255,0.16)"/>
+  <circle cx="120" cy="560" r="240" fill="rgba(15,23,42,0.16)"/>
+  <text x="88" y="275" fill="#fff" font-size="72" font-weight="700" font-family="Tahoma, Arial, sans-serif">{spec["title"]}</text>
+  <text x="92" y="365" fill="rgba(255,255,255,0.86)" font-size="36" font-family="Tahoma, Arial, sans-serif">{spec["subtitle"]}</text>
+  <text x="92" y="505" fill="rgba(255,255,255,0.72)" font-size="28" font-family="Tahoma, Arial, sans-serif">مرکز مشاوره و روان‌شناسی دانشگاه</text>
+</svg>
+"""
+            if not file_path.exists() or file_path.read_text(encoding="utf-8") != svg:
+                file_path.write_text(svg, encoding="utf-8")
+            paths[relative_path] = relative_path
+        return paths
 
     def _user(
         self,
@@ -436,6 +630,111 @@ class Command(BaseCommand):
                     )
                 )
 
+        return appointments
+
+    def _seed_appointment_history(
+        self,
+        therapist: TherapistProfile,
+        session_type: SessionType,
+        patients: list[PatientProfile],
+    ) -> list[Appointment]:
+        now = timezone.now()
+        specs = [
+            {
+                "patient": patients[0],
+                "starts_at": now - timedelta(days=16, hours=2),
+                "status": Appointment.Status.COMPLETED,
+                "payment_ref": "seed.history:patient1:completed",
+                "meeting_link": "",
+            },
+            {
+                "patient": patients[1] if len(patients) > 1 else patients[0],
+                "starts_at": now - timedelta(days=5, hours=3),
+                "status": Appointment.Status.CANCELED_BY_PATIENT,
+                "payment_ref": "seed.history:patient2:canceled",
+                "canceled_at": now - timedelta(days=5, hours=20),
+                "cancellation_reason": "تداخل با امتحان میان‌ترم",
+                "refund_policy_applied": Appointment.RefundPolicy.FULL_REFUND,
+            },
+            {
+                "patient": patients[2] if len(patients) > 2 else patients[0],
+                "starts_at": now - timedelta(days=2, hours=4),
+                "status": Appointment.Status.NO_SHOW,
+                "payment_ref": "seed.history:patient3:noshow",
+                "cancellation_reason": "عدم حضور در زمان مقرر",
+                "refund_policy_applied": Appointment.RefundPolicy.FORFEIT,
+            },
+            {
+                "patient": patients[3] if len(patients) > 3 else patients[0],
+                "starts_at": now + timedelta(days=16, hours=5),
+                "status": Appointment.Status.PENDING_PAYMENT,
+                "payment_ref": "seed.history:patient4:pending",
+                "meeting_link": "https://meet.google.com/pending-seed-demo",
+            },
+        ]
+
+        appointments: list[Appointment] = []
+        for spec in specs:
+            starts_at = spec["starts_at"]
+            ends_at = starts_at + timedelta(minutes=session_type.duration_minutes)
+            existing = Appointment.objects.filter(
+                payment_ref=spec["payment_ref"]
+            ).first()
+            if existing:
+                changed = []
+                for field in (
+                    "status",
+                    "meeting_link",
+                    "cancellation_reason",
+                    "refund_policy_applied",
+                ):
+                    value = spec.get(field, "")
+                    if getattr(existing, field) != value:
+                        setattr(existing, field, value)
+                        changed.append(field)
+                canceled_at = spec.get("canceled_at")
+                if existing.canceled_at != canceled_at:
+                    existing.canceled_at = canceled_at
+                    changed.append("canceled_at")
+                if changed:
+                    existing.save(update_fields=[*changed, "updated_at"])
+                appointments.append(existing)
+                continue
+
+            slot_status = (
+                AppointmentSlot.Status.BLOCKED
+                if spec["status"]
+                in {
+                    Appointment.Status.CANCELED_BY_PATIENT,
+                    Appointment.Status.CANCELED_BY_THERAPIST,
+                    Appointment.Status.CANCELED_BY_ADMIN,
+                }
+                else AppointmentSlot.Status.BOOKED
+            )
+            slot = AppointmentSlot.objects.create(
+                therapist=therapist,
+                session_type=session_type,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                status=slot_status,
+            )
+            appointments.append(
+                Appointment.objects.create(
+                    slot=slot,
+                    patient=spec["patient"],
+                    therapist=therapist,
+                    session_type=session_type,
+                    starts_at=starts_at,
+                    ends_at=ends_at,
+                    status=spec["status"],
+                    price_snapshot=session_type.price,
+                    payment_ref=spec["payment_ref"],
+                    meeting_link=spec.get("meeting_link", ""),
+                    canceled_at=spec.get("canceled_at"),
+                    cancellation_reason=spec.get("cancellation_reason", ""),
+                    refund_policy_applied=spec.get("refund_policy_applied", ""),
+                )
+            )
         return appointments
 
     def _seed_session_notes(
@@ -593,9 +892,15 @@ class Command(BaseCommand):
         return created
 
     def _seed_workshops(
-        self, therapist: TherapistProfile, patient: PatientProfile
+        self,
+        therapist: TherapistProfile,
+        patients: list[PatientProfile],
+        media_paths: dict[str, str],
     ) -> str:
         now = timezone.now()
+        primary_patient = patients[0]
+        secondary_patient = patients[1] if len(patients) > 1 else patients[0]
+        third_patient = patients[2] if len(patients) > 2 else patients[0]
         paid, _ = Workshop.objects.update_or_create(
             slug="anxiety-skills-paid",
             defaults={
@@ -613,7 +918,7 @@ class Command(BaseCommand):
                 "price": Decimal("350000"),
                 "starts_at": now + timedelta(days=10),
                 "ends_at": now + timedelta(days=17, hours=2),
-                "banner_image": "",
+                "banner_image": media_paths["psy/workshops/anxiety-skills-paid.svg"],
                 "is_published": True,
                 "certificate_enabled": True,
             },
@@ -630,7 +935,7 @@ class Command(BaseCommand):
                 "recording_url": "",
             },
         )
-        WorkshopSession.objects.update_or_create(
+        s2, _ = WorkshopSession.objects.update_or_create(
             workshop=paid,
             sort_order=2,
             defaults={
@@ -676,6 +981,7 @@ class Command(BaseCommand):
                 "price": Decimal("0"),
                 "starts_at": now + timedelta(days=7),
                 "ends_at": now + timedelta(days=7, hours=1, minutes=30),
+                "banner_image": media_paths["psy/workshops/mindfulness-free.svg"],
                 "is_published": True,
                 "certificate_enabled": False,
             },
@@ -702,13 +1008,14 @@ class Command(BaseCommand):
                 "price": Decimal("500000"),
                 "starts_at": now + timedelta(days=21),
                 "ends_at": now + timedelta(days=21, hours=2),
+                "banner_image": media_paths["psy/workshops/group-therapy-draft.svg"],
                 "is_published": False,
             },
         )
 
         enrollment, created = WorkshopEnrollment.objects.get_or_create(
             workshop=free,
-            patient=patient,
+            patient=primary_patient,
             defaults={
                 "status": WorkshopEnrollment.Status.ACTIVE,
                 "price_snapshot": Decimal("0"),
@@ -723,12 +1030,53 @@ class Command(BaseCommand):
             enrollment.hold_expires_at = None
             enrollment.save()
 
-        return (
-            f"paid={paid.slug} free={free.slug} "
-            f"lms_sessions={paid.sessions.count()} enrolled_patient1_free=1"
+        paid_enrollment, _ = WorkshopEnrollment.objects.update_or_create(
+            workshop=paid,
+            patient=secondary_patient,
+            defaults={
+                "status": WorkshopEnrollment.Status.ACTIVE,
+                "price_snapshot": paid.price,
+                "payment_ref": "seed.workshop.wallet:patient2",
+                "hold_expires_at": None,
+                "canceled_at": None,
+                "cancellation_reason": "",
+            },
+        )
+        WorkshopSessionProgress.objects.get_or_create(
+            enrollment=paid_enrollment,
+            session=s1,
+        )
+        WorkshopSessionProgress.objects.get_or_create(
+            enrollment=paid_enrollment,
+            session=s2,
+        )
+        WorkshopCertificate.objects.get_or_create(
+            enrollment=paid_enrollment,
+            defaults={
+                "certificate_code": "PSY-SEED-ANXIETY-P2",
+                "file": "",
+            },
         )
 
-    def _seed_blog(self, therapist_user, admin_user) -> str:
+        WorkshopEnrollment.objects.update_or_create(
+            workshop=paid,
+            patient=third_patient,
+            defaults={
+                "status": WorkshopEnrollment.Status.CANCELED,
+                "price_snapshot": paid.price,
+                "payment_ref": "seed.workshop.canceled:patient3",
+                "hold_expires_at": None,
+                "canceled_at": now - timedelta(days=1),
+                "cancellation_reason": "انصراف آزمایشی برای تست وضعیت لغوشده",
+            },
+        )
+
+        return (
+            f"paid={paid.slug} free={free.slug} "
+            f"lms_sessions={paid.sessions.count()} enrollments={paid.enrollments.count() + free.enrollments.count()}"
+        )
+
+    def _seed_blog(self, therapist_user, admin_user, media_paths: dict[str, str]) -> str:
         now = timezone.now()
         posts = [
             {
@@ -743,7 +1091,7 @@ class Command(BaseCommand):
                     "۲. نگه داشتن ۷ ثانیه\n"
                     "۳. بازدم ۸ ثانیه\n"
                 ),
-                "cover_image": "",
+                "cover_image": media_paths["psy/blog/anxiety-breathing-basics.svg"],
                 "author": therapist_user,
                 "is_published": True,
                 "published_at": now - timedelta(days=5),
@@ -759,7 +1107,7 @@ class Command(BaseCommand):
                     "- احساس درماندگی بیش از دو هفته\n\n"
                     "رزرو نوبت از صفحه درمانگران مرکز امکان‌پذیر است.\n"
                 ),
-                "cover_image": "",
+                "cover_image": media_paths["psy/blog/when-to-see-a-therapist.svg"],
                 "author": therapist_user,
                 "is_published": True,
                 "published_at": now - timedelta(days=2),
@@ -769,7 +1117,7 @@ class Command(BaseCommand):
                 "title": "پیش‌نویس: بهداشت خواب",
                 "excerpt": "هنوز منتشر نشده.",
                 "body": "## در حال نگارش\n\nاین مقاله هنوز آماده انتشار نیست.\n",
-                "cover_image": "",
+                "cover_image": media_paths["psy/blog/sleep-hygiene-draft.svg"],
                 "author": admin_user,
                 "is_published": False,
                 "published_at": None,
@@ -790,3 +1138,115 @@ class Command(BaseCommand):
             )
         published = BlogPost.objects.filter(is_published=True).count()
         return f"published={published} draft=draft-sleep-hygiene"
+
+    def _seed_tickets(self, admin_user, patients: list[PatientProfile]) -> str:
+        specs = [
+            {
+                "patient": patients[0],
+                "type": Ticket.Type.GENERAL,
+                "subject": "سؤال درباره تغییر زمان جلسه",
+                "status": Ticket.Status.IN_PROGRESS,
+                "messages": [
+                    (patients[0].user, "سلام، امکان جابه‌جایی جلسه این هفته وجود دارد؟", False),
+                    (admin_user, "سلام، درخواست شما ثبت شد و درمانگر بررسی می‌کند.", True),
+                ],
+            },
+            {
+                "patient": patients[1] if len(patients) > 1 else patients[0],
+                "type": Ticket.Type.WITHDRAWAL,
+                "subject": "درخواست برداشت موجودی کیف پول",
+                "status": Ticket.Status.OPEN,
+                "withdrawal_ref": "seed.withdrawal:patient2",
+                "bank_details_snapshot": {
+                    "iban": "IR820540102680020817909002",
+                    "account_owner": "رضا محمدی",
+                },
+                "messages": [
+                    (
+                        patients[1].user if len(patients) > 1 else patients[0].user,
+                        "لطفاً موجودی کیف پول به حساب معرفی‌شده واریز شود.",
+                        False,
+                    ),
+                ],
+            },
+            {
+                "patient": patients[2] if len(patients) > 2 else patients[0],
+                "type": Ticket.Type.COMPLAINT,
+                "subject": "گزارش مشکل لینک جلسه",
+                "status": Ticket.Status.RESOLVED,
+                "messages": [
+                    (
+                        patients[2].user if len(patients) > 2 else patients[0].user,
+                        "لینک جلسه آنلاین باز نمی‌شد.",
+                        False,
+                    ),
+                    (admin_user, "لینک جدید ارسال شد و مشکل رفع شد.", True),
+                ],
+            },
+        ]
+
+        created_or_updated = 0
+        for spec in specs:
+            ticket, _ = Ticket.objects.update_or_create(
+                patient=spec["patient"],
+                subject=spec["subject"],
+                defaults={
+                    "type": spec["type"],
+                    "status": spec["status"],
+                    "withdrawal_ref": spec.get("withdrawal_ref", ""),
+                    "bank_details_snapshot": spec.get("bank_details_snapshot", {}),
+                },
+            )
+            for author, body, is_staff_reply in spec["messages"]:
+                TicketMessage.objects.get_or_create(
+                    ticket=ticket,
+                    author=author,
+                    body=body,
+                    defaults={"is_staff_reply": is_staff_reply},
+                )
+            created_or_updated += 1
+        return f"rows={created_or_updated}"
+
+    def _seed_site_pages(self, media_paths: dict[str, str]) -> str:
+        SitePage.objects.update_or_create(
+            key="psy-about",
+            defaults={
+                "title": "درباره مرکز مشاوره و روان‌شناسی",
+                "body": {
+                    "hero": {
+                        "title": "مرکز مشاوره و روان‌شناسی دانشگاه",
+                        "subtitle": "رزرو جلسه، آزمون‌های روان‌سنجی و کارگاه‌های آموزشی در یک پورتال.",
+                        "image": media_paths["psy/workshops/mindfulness-free.svg"],
+                    },
+                    "sections": [
+                        {
+                            "title": "خدمات",
+                            "items": [
+                                "جلسات حضوری و آنلاین",
+                                "پرسشنامه‌های روان‌سنجی",
+                                "کارگاه‌های مهارت‌آموزی",
+                            ],
+                        },
+                        {
+                            "title": "اطلاعات تماس",
+                            "items": [
+                                "تلفن: ۰۲۱-۱۲۳۴۵۶۷۸",
+                                "ایمیل: psy-center@example.com",
+                            ],
+                        },
+                    ],
+                },
+            },
+        )
+        SitePage.objects.update_or_create(
+            key="psy-contact",
+            defaults={
+                "title": "تماس با مرکز",
+                "body": {
+                    "address": "ساختمان خدمات دانشجویی، طبقه دوم",
+                    "working_hours": "شنبه تا چهارشنبه، ۸ تا ۱۵",
+                    "emergency_note": "در شرایط بحران فوری با اورژانس اجتماعی یا مراکز درمانی تماس بگیرید.",
+                },
+            },
+        )
+        return "psy-about, psy-contact"
