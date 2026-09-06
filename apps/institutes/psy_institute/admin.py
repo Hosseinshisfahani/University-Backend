@@ -66,6 +66,7 @@ class TicketAdmin(admin.ModelAdmin):
 admin.site.register(models.TherapistSessionOffer)
 admin.site.register(models.AvailabilityException)
 admin.site.register(models.LeaveRequest)
+admin.site.register(models.TherapistReview)
 admin.site.register(models.SessionNote)
 admin.site.register(models.PsychometricResponse)
 admin.site.register(models.WorkshopEnrollment)

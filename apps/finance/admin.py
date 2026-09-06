@@ -2,6 +2,9 @@ from django.contrib import admin
 
 from .models import LedgerEntry, Payment, Wallet, WithdrawalRequest
 
+admin.sites.AdminSite.site_header = "پنل اختصاصی ادمین مرکز مشاوره"
+admin.sites.AdminSite.index_title = "ادیت بخش های مختلف"
+admin.sites.AdminSite.site_title = "پنل کامل "
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):

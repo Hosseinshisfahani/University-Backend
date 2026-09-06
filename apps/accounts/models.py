@@ -9,7 +9,11 @@ class User(AbstractUser):
     هر چیزی که میخوای برای کاربر باشه رو اینجا بنویس
     """
 
-    email = models.EmailField("email address", blank=True)
+    email = models.EmailField(verbose_name="ایمیل", blank=True)
+
+    class Meta(AbstractUser.Meta):
+        verbose_name = "کاربر"
+        verbose_name_plural = "کاربران"
 
     def __str__(self) -> str:
         return self.get_full_name() or self.username

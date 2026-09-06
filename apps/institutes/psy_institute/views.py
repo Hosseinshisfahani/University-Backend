@@ -1,18 +1,33 @@
+"""Psychology Institute portal REST views.
+
+Serves the public catalog, patient portal, and therapist portal.
+
+Clinic-admin aggregates live in ``admin_api.py``.
+Therapist schedule CRUD lives in ``schedule_admin.py``.
+Business rules live in ``services/`` — views only authenticate, scope
+querysets, and translate service errors into HTTP responses.
+"""
+
+from __future__ import annotations
+
+from calendar import monthrange
+from datetime import date
+
 from django.contrib.auth.models import Group
 from django.db import transaction
-from django.db.models import Prefetch, Q
+from django.db.models import Avg, Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import mixins, serializers, status, viewsets
-from rest_framework.exceptions import PermissionDenied
+from django.utils.dateparse import parse_date
+from rest_framework import mixins, serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.finance import services as finance_services
-from apps.finance.models import LedgerEntry
 
 from . import services
 from .models import (
@@ -27,10 +42,12 @@ from .models import (
     SessionType,
     SitePage,
     TherapistProfile,
+    TherapistReview,
     TherapistSessionOffer,
     Ticket,
     TicketMessage,
     Workshop,
+    WorkshopCertificate,
     WorkshopEnrollment,
     WorkshopResource,
     WorkshopSession,
@@ -51,6 +68,7 @@ from .serializers import (
     MoveAppointmentSerializer,
     PsychometricFormSerializer,
     PsychometricResponseSerializer,
+    PublicTherapistReviewSerializer,
     RegenerateSlotsSerializer,
     SessionNoteSerializer,
     SessionTypeSerializer,
@@ -58,9 +76,12 @@ from .serializers import (
     SitePageSerializer,
     SubmitLeaveRequestSerializer,
     SubmitPsychometricSerializer,
+    SubmitTherapistReviewSerializer,
     TherapistAvailabilitySerializer,
+    TherapistFinanceReportSerializer,
     TherapistPatientSummarySerializer,
     TherapistProfileSerializer,
+    TherapistReviewSerializer,
     TherapistSessionOfferSerializer,
     TicketMessageSerializer,
     TicketSerializer,
@@ -72,116 +93,45 @@ from .serializers import (
     WorkshopSessionWriteSerializer,
 )
 
-
-class SessionTypeViewSet(viewsets.ModelViewSet):
-    queryset = SessionType.objects.all()
-    serializer_class = SessionTypeSerializer
-    lookup_field = "slug"
-    permission_classes = [IsPsyAdminOrReadOnly]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        if self.action in ("list", "retrieve") and not (
-            self.request.user.is_authenticated
-            and (self.request.user.is_staff or self.request.user.groups.filter(name="psy_admin").exists())
-        ):
-            return qs.filter(is_active=True)
-        return qs
+PSY_ADMIN_GROUP = "psy_admin"
+PSY_ROLE_GROUPS = ("psy_admin", "psy_therapist", "psy_patient")
+SCHEDULE_ADMIN_MANAGED_MSG = "Therapist schedule is managed by clinic admin."
 
 
-class TherapistProfileViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
-    queryset = TherapistProfile.objects.filter(
-        is_active=True, is_accepting_patients=True
-    ).prefetch_related(
-        Prefetch(
-            "session_offers",
-            queryset=TherapistSessionOffer.objects.filter(
-                is_active=True, session_type__is_active=True
-            ).select_related("session_type"),
-            to_attr="active_offers",
-        )
-    )
-    serializer_class = TherapistProfileSerializer
-    permission_classes = [AllowAny]
-
-    @action(detail=True, methods=["get"], url_path="slots")
-    def slots(self, request, pk=None):
-        therapist = self.get_object()
-        qs = AppointmentSlot.objects.filter(
-            therapist=therapist,
-            status=AppointmentSlot.Status.OPEN,
-            appointment__isnull=True,
-            starts_at__gte=timezone.now(),
-        ).select_related("therapist")
-        date_from = request.query_params.get("from")
-        date_to = request.query_params.get("to")
-        if date_from:
-            qs = qs.filter(starts_at__date__gte=date_from)
-        if date_to:
-            qs = qs.filter(starts_at__date__lte=date_to)
-        return Response(AppointmentSlotSerializer(qs[:200], many=True).data)
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
-class TherapistAvailabilityViewSet(viewsets.ModelViewSet):
-    serializer_class = TherapistAvailabilitySerializer
-    permission_classes = [IsAuthenticated, IsTherapist]
-
-    def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
-        raise PermissionDenied("Therapist schedule is managed by clinic admin.")
+def _is_clinic_admin(user) -> bool:
+    """Staff or ``psy_admin`` group. Anonymous users are never admin."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    return user.is_staff or user.groups.filter(name=PSY_ADMIN_GROUP).exists()
 
 
-class AvailabilityExceptionViewSet(viewsets.ModelViewSet):
-    serializer_class = AvailabilityExceptionSerializer
-    permission_classes = [IsAuthenticated, IsTherapist]
-
-    def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
-        raise PermissionDenied("Therapist schedule is managed by clinic admin.")
+def _patient_profile(user):
+    if user and hasattr(user, "patient_profile"):
+        return user.patient_profile
+    return None
 
 
-class TherapistSessionOfferViewSet(viewsets.ModelViewSet):
-    serializer_class = TherapistSessionOfferSerializer
-    permission_classes = [IsAuthenticated, IsTherapist]
-
-    def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)
-        raise PermissionDenied("Therapist schedule is managed by clinic admin.")
+def _therapist_profile(user):
+    if user and hasattr(user, "therapist_profile"):
+        return user.therapist_profile
+    return None
 
 
-class TherapistLeaveRequestViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet):
-    serializer_class = LeaveRequestSerializer
-    permission_classes = [IsAuthenticated, IsTherapist]
+def _detail(message: str, status_code: int = 400) -> Response:
+    return Response({"detail": message}, status=status_code)
 
-    def get_queryset(self):
-        return LeaveRequest.objects.filter(
-            therapist=self.request.user.therapist_profile
-        ).select_related("therapist")
 
-    def create(self, request):
-        ser = SubmitLeaveRequestSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        try:
-            leave = services.submit_leave_request(
-                therapist=request.user.therapist_profile,
-                starts_on=ser.validated_data["starts_on"],
-                ends_on=ser.validated_data["ends_on"],
-                reason=ser.validated_data["reason"],
-                start_time=ser.validated_data.get("start_time"),
-                end_time=ser.validated_data.get("end_time"),
-            )
-        except services.LeaveError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response(LeaveRequestSerializer(leave).data, status=201)
+def _forbidden(message: str = "Forbidden.") -> Response:
+    return _detail(message, 403)
 
-    @action(detail=True, methods=["post"])
-    def cancel(self, request, pk=None):
-        leave = get_object_or_404(self.get_queryset(), pk=pk)
-        try:
-            leave = services.cancel_leave_request(leave=leave)
-        except services.LeaveError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response(LeaveRequestSerializer(leave).data)
+
+def _appointment_payload(appt, request, *, many=False):
+    return AppointmentSerializer(appt, many=many, context={"request": request}).data
 
 
 def _patient_display_name(patient: PatientProfile) -> str:
@@ -217,8 +167,164 @@ def _build_patient_summary(therapist: TherapistProfile, patient: PatientProfile)
     }
 
 
+class AdminManagedScheduleMixin:
+    """Therapist self-service schedule endpoints are intentionally disabled.
+
+    Availability, exceptions, and session offers are owned by clinic admin
+    (see ``schedule_admin.py``). These viewsets stay registered so old
+    client URLs return a clear 403 instead of 404.
+    """
+
+    permission_classes = [IsAuthenticated, IsTherapist]
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        raise PermissionDenied(SCHEDULE_ADMIN_MANAGED_MSG)
+
+
+# ===========================================================================
+# Public catalog
+# ===========================================================================
+
+
+class SessionTypeViewSet(viewsets.ModelViewSet):
+    """Session-type catalog. Public sees active types; admin sees all."""
+
+    queryset = SessionType.objects.all()
+    serializer_class = SessionTypeSerializer
+    lookup_field = "slug"
+    permission_classes = [IsPsyAdminOrReadOnly]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action in ("list", "retrieve") and not _is_clinic_admin(self.request.user):
+            return qs.filter(is_active=True)
+        return qs
+
+
+class TherapistProfileViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """Public therapist directory plus open slots for booking."""
+
+    serializer_class = TherapistProfileSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        return (
+            TherapistProfile.objects.filter(
+                is_active=True, is_accepting_patients=True
+            )
+            .prefetch_related(
+                Prefetch(
+                    "session_offers",
+                    queryset=TherapistSessionOffer.objects.filter(
+                        is_active=True, session_type__is_active=True
+                    ).select_related("session_type"),
+                    to_attr="active_offers",
+                )
+            )
+            .annotate(
+                rating_avg=Avg("reviews__rating"),
+                rating_count=Count("reviews"),
+            )
+        )
+
+    @action(detail=True, methods=["get"], url_path="reviews")
+    def reviews(self, request, pk=None):
+        therapist = self.get_object()
+        qs = (
+            TherapistReview.objects.filter(
+                therapist=therapist,
+                text_status=TherapistReview.TextStatus.APPROVED,
+            )
+            .exclude(body="")
+            .select_related("patient__user")
+            .order_by("-created_at")
+        )
+        return Response(PublicTherapistReviewSerializer(qs[:100], many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="slots")
+    def slots(self, request, pk=None):
+        therapist = self.get_object()
+        qs = AppointmentSlot.objects.filter(
+            therapist=therapist,
+            status=AppointmentSlot.Status.OPEN,
+            appointment__isnull=True,
+            starts_at__gte=timezone.now(),
+        ).select_related("therapist")
+        date_from = request.query_params.get("from")
+        date_to = request.query_params.get("to")
+        if date_from:
+            qs = qs.filter(starts_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(starts_at__date__lte=date_to)
+        return Response(AppointmentSlotSerializer(qs[:200], many=True).data)
+
+
+# ===========================================================================
+# Therapist portal — schedule (disabled) + leave
+# ===========================================================================
+
+
+class TherapistAvailabilityViewSet(AdminManagedScheduleMixin, viewsets.ModelViewSet):
+    serializer_class = TherapistAvailabilitySerializer
+
+
+class AvailabilityExceptionViewSet(AdminManagedScheduleMixin, viewsets.ModelViewSet):
+    serializer_class = AvailabilityExceptionSerializer
+
+
+class TherapistSessionOfferViewSet(AdminManagedScheduleMixin, viewsets.ModelViewSet):
+    serializer_class = TherapistSessionOfferSerializer
+
+
+class TherapistLeaveRequestViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
+):
+    """Therapist submits and cancels their own leave; admin approves elsewhere."""
+
+    serializer_class = LeaveRequestSerializer
+    permission_classes = [IsAuthenticated, IsTherapist]
+
+    def get_queryset(self):
+        return LeaveRequest.objects.filter(
+            therapist=self.request.user.therapist_profile
+        ).select_related("therapist")
+
+    def create(self, request):
+        ser = SubmitLeaveRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            leave = services.submit_leave_request(
+                therapist=request.user.therapist_profile,
+                starts_on=ser.validated_data["starts_on"],
+                ends_on=ser.validated_data["ends_on"],
+                reason=ser.validated_data["reason"],
+                start_time=ser.validated_data.get("start_time"),
+                end_time=ser.validated_data.get("end_time"),
+            )
+        except services.LeaveError as exc:
+            return _detail(str(exc))
+        return Response(LeaveRequestSerializer(leave).data, status=201)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        leave = get_object_or_404(self.get_queryset(), pk=pk)
+        try:
+            leave = services.cancel_leave_request(leave=leave)
+        except services.LeaveError as exc:
+            return _detail(str(exc))
+        return Response(LeaveRequestSerializer(leave).data)
+
+
+# ===========================================================================
+# Therapist portal — patients
+# ===========================================================================
+
+
 class TherapistPatientViewSet(viewsets.GenericViewSet):
-    """Unique patients who have booked with the authenticated therapist."""
+    """Patients who have booked with the authenticated therapist."""
 
     permission_classes = [IsAuthenticated, IsTherapist]
     lookup_url_kwarg = "pk"
@@ -258,35 +364,50 @@ class TherapistPatientViewSet(viewsets.GenericViewSet):
             .select_related("form", "patient", "patient__user", "routed_therapist")
             .order_by("-submitted_at")[:20]
         )
-        payload = {
-            **summary,
-            "recent_appointments": AppointmentSerializer(
-                recent_appointments, many=True
-            ).data,
-            "recent_notes": SessionNoteSerializer(recent_notes, many=True).data,
-            "recent_responses": PsychometricResponseSerializer(
-                recent_responses, many=True
-            ).data,
-        }
         # Nested collections are already rendered dicts; do not re-run ModelSerializers.
-        return Response(payload)
+        return Response(
+            {
+                **summary,
+                "recent_appointments": AppointmentSerializer(
+                    recent_appointments, many=True
+                ).data,
+                "recent_notes": SessionNoteSerializer(recent_notes, many=True).data,
+                "recent_responses": PsychometricResponseSerializer(
+                    recent_responses, many=True
+                ).data,
+            }
+        )
+
+
+# ===========================================================================
+# Appointments (patient / therapist / admin)
+# ===========================================================================
 
 
 class AppointmentViewSet(viewsets.GenericViewSet):
+    """Book, pay, cancel, and inspect appointments.
+
+    Queryset is scoped by role: admin sees all, therapist sees theirs,
+    patient sees theirs. List without ``?page=`` stays a flat array for
+    existing portals; ``?page=`` returns a paginated envelope.
+    """
+
     serializer_class = AppointmentSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
         qs = Appointment.objects.select_related(
-            "patient__user", "therapist", "session_type", "slot"
+            "patient__user", "therapist", "session_type", "slot", "review"
         )
-        if user.is_staff or user.groups.filter(name="psy_admin").exists():
+        if _is_clinic_admin(user):
             return qs
-        if hasattr(user, "therapist_profile"):
-            return qs.filter(therapist=user.therapist_profile)
-        if hasattr(user, "patient_profile"):
-            return qs.filter(patient=user.patient_profile)
+        therapist = _therapist_profile(user)
+        if therapist:
+            return qs.filter(therapist=therapist)
+        patient = _patient_profile(user)
+        if patient:
+            return qs.filter(patient=patient)
         return qs.none()
 
     def _filtered_queryset(self, request):
@@ -312,8 +433,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         qs = self._filtered_queryset(request)
         page_raw = request.query_params.get("page")
         if page_raw is None:
-            # Backward-compatible flat list for patient/therapist portals.
-            return Response(AppointmentSerializer(qs[:100], many=True).data)
+            return Response(_appointment_payload(qs[:100], request, many=True))
 
         try:
             page = max(1, int(page_raw))
@@ -332,39 +452,39 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 "count": total,
                 "page": page,
                 "page_size": page_size,
-                "results": AppointmentSerializer(items, many=True).data,
+                "results": _appointment_payload(items, request, many=True),
             }
         )
 
     def retrieve(self, request, pk=None):
         appt = get_object_or_404(self.get_queryset(), pk=pk)
-        return Response(AppointmentSerializer(appt).data)
+        return Response(_appointment_payload(appt, request))
 
     def create(self, request):
-        if not hasattr(request.user, "patient_profile"):
-            return Response({"detail": "Patient profile required."}, status=400)
+        patient = _patient_profile(request.user)
+        if not patient:
+            return _detail("Patient profile required.")
         ser = BookAppointmentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
             appt = services.book_slot(
-                patient=request.user.patient_profile,
+                patient=patient,
                 slot_id=ser.validated_data["slot_id"],
                 session_type_id=ser.validated_data["session_type_id"],
             )
         except AppointmentSlot.DoesNotExist:
-            return Response({"detail": "Slot not found."}, status=404)
+            return _detail("Slot not found.", 404)
         except services.BookingError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response(AppointmentSerializer(appt).data, status=201)
+            return _detail(str(exc))
+        return Response(_appointment_payload(appt, request), status=201)
 
     @action(detail=True, methods=["post"])
     def confirm_payment(self, request, pk=None):
         appt = get_object_or_404(self.get_queryset(), pk=pk)
-        if not (
-            hasattr(request.user, "patient_profile")
-            and appt.patient_id == request.user.patient_profile.id
-        ) and not (request.user.is_staff or request.user.groups.filter(name="psy_admin").exists()):
-            return Response({"detail": "Forbidden."}, status=403)
+        patient = _patient_profile(request.user)
+        owns_appointment = patient and appt.patient_id == patient.id
+        if not owns_appointment and not _is_clinic_admin(request.user):
+            return _forbidden()
         ser = ConfirmAppointmentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
@@ -374,10 +494,11 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 idempotency_key=ser.validated_data["idempotency_key"],
             )
         except services.BookingError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        except Exception as exc:  # finance errors
-            return Response({"detail": str(exc)}, status=400)
-        return Response(AppointmentSerializer(appt).data)
+            return _detail(str(exc))
+        except Exception as exc:
+            # Finance app raises domain errors that are not BookingError.
+            return _detail(str(exc))
+        return Response(_appointment_payload(appt, request))
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
@@ -385,19 +506,18 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         ser = CancelAppointmentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
 
-        if request.user.is_staff or request.user.groups.filter(name="psy_admin").exists():
+        therapist = _therapist_profile(request.user)
+        patient = _patient_profile(request.user)
+        if _is_clinic_admin(request.user):
             role = "admin"
-        elif hasattr(request.user, "therapist_profile") and appt.therapist_id == request.user.therapist_profile.id:
-            return Response(
-                {
-                    "detail": "Therapists cannot cancel appointments. Submit a leave request."
-                },
-                status=403,
+        elif therapist and appt.therapist_id == therapist.id:
+            return _forbidden(
+                "Therapists cannot cancel appointments. Submit a leave request."
             )
-        elif hasattr(request.user, "patient_profile") and appt.patient_id == request.user.patient_profile.id:
+        elif patient and appt.patient_id == patient.id:
             role = "patient"
         else:
-            return Response({"detail": "Forbidden."}, status=403)
+            return _forbidden()
 
         try:
             appt = services.cancel_appointment(
@@ -406,26 +526,56 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 reason=ser.validated_data.get("reason", ""),
             )
         except services.BookingError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response(AppointmentSerializer(appt).data)
+            return _detail(str(exc))
+        return Response(_appointment_payload(appt, request))
 
     @action(detail=True, methods=["post"])
     def set_meeting_link(self, request, pk=None):
         appt = get_object_or_404(self.get_queryset(), pk=pk)
-        is_owner_therapist = (
-            hasattr(request.user, "therapist_profile")
-            and appt.therapist_id == request.user.therapist_profile.id
-        )
-        is_admin = request.user.is_staff or request.user.groups.filter(
-            name="psy_admin"
-        ).exists()
-        if not (is_owner_therapist or is_admin):
-            return Response({"detail": "Forbidden."}, status=403)
+        therapist = _therapist_profile(request.user)
+        is_owner_therapist = therapist and appt.therapist_id == therapist.id
+        if not (is_owner_therapist or _is_clinic_admin(request.user)):
+            return _forbidden()
         ser = SetMeetingLinkSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         appt.meeting_link = ser.validated_data.get("meeting_link", "") or ""
         appt.save(update_fields=["meeting_link", "updated_at"])
-        return Response(AppointmentSerializer(appt).data)
+        return Response(_appointment_payload(appt, request))
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        appt = get_object_or_404(self.get_queryset(), pk=pk)
+        therapist = _therapist_profile(request.user)
+        is_owner_therapist = therapist and appt.therapist_id == therapist.id
+        if not (is_owner_therapist or _is_clinic_admin(request.user)):
+            return _forbidden()
+        try:
+            appt = services.complete_appointment(appointment=appt)
+        except services.BookingError as exc:
+            return _detail(str(exc))
+        return Response(_appointment_payload(appt, request))
+
+    @action(detail=True, methods=["post"])
+    def review(self, request, pk=None):
+        appt = get_object_or_404(Appointment.objects.all(), pk=pk)
+        patient = _patient_profile(request.user)
+        if not patient or appt.patient_id != patient.id:
+            return _forbidden()
+        ser = SubmitTherapistReviewSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            review = services.create_review(
+                appointment=appt,
+                patient=patient,
+                rating=ser.validated_data["rating"],
+                body=ser.validated_data.get("body", ""),
+            )
+        except services.ReviewError as exc:
+            return _detail(str(exc))
+        return Response(
+            TherapistReviewSerializer(review, context={"request": request}).data,
+            status=201,
+        )
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPsyAdmin])
     def move(self, request, pk=None):
@@ -437,13 +587,34 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 appointment=appt, new_slot_id=ser.validated_data["new_slot_id"]
             )
         except services.BookingError as exc:
-            return Response({"detail": str(exc)}, status=400)
+            return _detail(str(exc))
         except AppointmentSlot.DoesNotExist:
-            return Response({"detail": "Slot not found."}, status=404)
-        return Response(AppointmentSerializer(appt).data)
+            return _detail("Slot not found.", 404)
+        return Response(_appointment_payload(appt, request))
+
+
+class TherapistReviewListView(APIView):
+    """Therapist sees own ratings; comment text only after admin approval."""
+
+    permission_classes = [IsAuthenticated, IsTherapist]
+
+    def get(self, request):
+        therapist = request.user.therapist_profile
+        qs = (
+            TherapistReview.objects.filter(therapist=therapist)
+            .select_related("patient__user", "therapist")
+            .order_by("-created_at")
+        )
+        return Response(
+            TherapistReviewSerializer(
+                qs[:200], many=True, context={"request": request}
+            ).data
+        )
 
 
 class RegenerateSlotsView(APIView):
+    """Admin: rebuild open slots for a therapist over a date range."""
+
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def post(self, request):
@@ -460,22 +631,28 @@ class RegenerateSlotsView(APIView):
         return Response({"created": created})
 
 
+# ===========================================================================
+# Session notes
+# ===========================================================================
+
+
 class SessionNoteViewSet(viewsets.ModelViewSet):
+    """Therapist authors notes; patients only see notes shared with them."""
+
     serializer_class = SessionNoteSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
         qs = SessionNote.objects.select_related("appointment", "author")
-        if user.is_staff or user.groups.filter(name="psy_admin").exists():
+        if _is_clinic_admin(user):
             return qs
-        if hasattr(user, "therapist_profile"):
-            return qs.filter(author=user.therapist_profile)
-        if hasattr(user, "patient_profile"):
-            return qs.filter(
-                appointment__patient=user.patient_profile,
-                shared_with_patient=True,
-            )
+        therapist = _therapist_profile(user)
+        if therapist:
+            return qs.filter(author=therapist)
+        patient = _patient_profile(user)
+        if patient:
+            return qs.filter(appointment__patient=patient, shared_with_patient=True)
         return qs.none()
 
     def perform_create(self, serializer):
@@ -486,7 +663,14 @@ class SessionNoteViewSet(viewsets.ModelViewSet):
         serializer.save(author=therapist)
 
 
+# ===========================================================================
+# Psychometrics
+# ===========================================================================
+
+
 class PsychometricFormViewSet(viewsets.ModelViewSet):
+    """Form catalog. Public/patient sees published forms; admin sees drafts."""
+
     queryset = PsychometricForm.objects.all()
     serializer_class = PsychometricFormSerializer
     lookup_field = "slug"
@@ -494,9 +678,8 @@ class PsychometricFormViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        if self.action in ("list", "retrieve", "submit") and not (
-            self.request.user.is_authenticated
-            and (self.request.user.is_staff or self.request.user.groups.filter(name="psy_admin").exists())
+        if self.action in ("list", "retrieve", "submit") and not _is_clinic_admin(
+            self.request.user
         ):
             return qs.filter(is_published=True)
         return qs
@@ -523,7 +706,14 @@ class PsychometricFormViewSet(viewsets.ModelViewSet):
         return Response(PsychometricResponseSerializer(response).data, status=201)
 
 
-class PsychometricResponseViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
+class PsychometricResponseViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Submitted answers: patient owns theirs; therapist sees routed ones."""
+
     serializer_class = PsychometricResponseSerializer
     permission_classes = [IsAuthenticated]
 
@@ -532,16 +722,25 @@ class PsychometricResponseViewSet(mixins.ListModelMixin, mixins.RetrieveModelMix
         qs = PsychometricResponse.objects.select_related(
             "form", "patient", "patient__user", "routed_therapist"
         )
-        if user.is_staff or user.groups.filter(name="psy_admin").exists():
+        if _is_clinic_admin(user):
             return qs
-        if hasattr(user, "therapist_profile"):
-            return qs.filter(routed_therapist=user.therapist_profile)
-        if hasattr(user, "patient_profile"):
-            return qs.filter(patient=user.patient_profile)
+        therapist = _therapist_profile(user)
+        if therapist:
+            return qs.filter(routed_therapist=therapist)
+        patient = _patient_profile(user)
+        if patient:
+            return qs.filter(patient=patient)
         return qs.none()
 
 
+# ===========================================================================
+# Workshops
+# ===========================================================================
+
+
 class WorkshopViewSet(viewsets.ModelViewSet):
+    """Workshop catalog plus enroll / pay / complete / certificate actions."""
+
     queryset = Workshop.objects.select_related("instructor").all()
     serializer_class = WorkshopSerializer
     lookup_field = "slug"
@@ -555,9 +754,7 @@ class WorkshopViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        is_admin = user.is_authenticated and (
-            user.is_staff or user.groups.filter(name="psy_admin").exists()
-        )
+        is_admin = _is_clinic_admin(user)
         if is_admin:
             pass
         elif self.action in ("list", "enroll"):
@@ -571,13 +768,12 @@ class WorkshopViewSet(viewsets.ModelViewSet):
             "confirm_enrollment",
             "cancel_enrollment",
         ):
-            if hasattr(user, "therapist_profile"):
-                qs = qs.filter(
-                    Q(is_published=True) | Q(instructor=user.therapist_profile)
-                )
+            therapist = _therapist_profile(user)
+            if therapist:
+                qs = qs.filter(Q(is_published=True) | Q(instructor=therapist))
             elif not is_admin:
-                # Anonymous / patient: published only for retrieve;
-                # complete/cert still need published workshop object.
+                # Anonymous / patient: published only. Complete/cert still
+                # resolve against a published workshop object.
                 qs = qs.filter(is_published=True)
         if self.action == "list" and self.request.query_params.get("upcoming") == "1":
             qs = qs.filter(starts_at__gte=timezone.now())
@@ -587,8 +783,17 @@ class WorkshopViewSet(viewsets.ModelViewSet):
 
     def _workshop_error_response(self, exc: services.WorkshopError):
         body = {"code": exc.code, "detail": str(exc), **exc.extra}
-        status_code = 403 if exc.code in ("forbidden",) else 400
+        status_code = 403 if exc.code == "forbidden" else 400
         return Response(body, status=status_code)
+
+    def _require_active_enrollment(self, request, workshop):
+        enrollment = services.get_active_enrollment(user=request.user, workshop=workshop)
+        if enrollment:
+            return enrollment, None
+        return None, Response(
+            {"code": "forbidden", "detail": "Active enrollment required."},
+            status=403,
+        )
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsPatient])
     def enroll(self, request, slug=None):
@@ -600,10 +805,7 @@ class WorkshopViewSet(viewsets.ModelViewSet):
             )
         except services.WorkshopError as exc:
             return self._workshop_error_response(exc)
-        return Response(
-            WorkshopEnrollmentSerializer(enrollment).data,
-            status=201,
-        )
+        return Response(WorkshopEnrollmentSerializer(enrollment).data, status=201)
 
     @action(
         detail=True,
@@ -644,15 +846,11 @@ class WorkshopViewSet(viewsets.ModelViewSet):
             pk=enrollment_id,
             workshop=workshop,
         )
-        is_admin = request.user.is_staff or request.user.groups.filter(
-            name="psy_admin"
-        ).exists()
-        is_owner = (
-            hasattr(request.user, "patient_profile")
-            and enrollment.patient_id == request.user.patient_profile.id
-        )
+        patient = _patient_profile(request.user)
+        is_admin = _is_clinic_admin(request.user)
+        is_owner = patient and enrollment.patient_id == patient.id
         if not (is_admin or is_owner):
-            return Response({"detail": "Forbidden."}, status=403)
+            return _forbidden()
 
         ser = CancelWorkshopEnrollmentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -674,15 +872,11 @@ class WorkshopViewSet(viewsets.ModelViewSet):
     )
     def roster(self, request, slug=None):
         workshop = self.get_object()
-        is_admin = request.user.is_staff or request.user.groups.filter(
-            name="psy_admin"
-        ).exists()
-        is_instructor = (
-            hasattr(request.user, "therapist_profile")
-            and workshop.instructor_id == request.user.therapist_profile.id
-        )
+        therapist = _therapist_profile(request.user)
+        is_admin = _is_clinic_admin(request.user)
+        is_instructor = therapist and workshop.instructor_id == therapist.id
         if not (is_admin or is_instructor):
-            return Response({"detail": "Forbidden."}, status=403)
+            return _forbidden()
         if is_admin:
             workshop = get_object_or_404(Workshop, slug=slug)
         rows = (
@@ -703,17 +897,10 @@ class WorkshopViewSet(viewsets.ModelViewSet):
     )
     def complete_session(self, request, slug=None, session_id=None):
         workshop = self.get_object()
-        enrollment = services.get_active_enrollment(
-            user=request.user, workshop=workshop
-        )
-        if not enrollment:
-            return Response(
-                {"code": "forbidden", "detail": "Active enrollment required."},
-                status=403,
-            )
-        session = get_object_or_404(
-            WorkshopSession, pk=session_id, workshop=workshop
-        )
+        enrollment, error = self._require_active_enrollment(request, workshop)
+        if error:
+            return error
+        session = get_object_or_404(WorkshopSession, pk=session_id, workshop=workshop)
         try:
             services.mark_session_complete(enrollment=enrollment, session=session)
         except services.WorkshopError as exc:
@@ -730,14 +917,9 @@ class WorkshopViewSet(viewsets.ModelViewSet):
     )
     def issue_certificate(self, request, slug=None):
         workshop = self.get_object()
-        enrollment = services.get_active_enrollment(
-            user=request.user, workshop=workshop
-        )
-        if not enrollment:
-            return Response(
-                {"code": "forbidden", "detail": "Active enrollment required."},
-                status=403,
-            )
+        enrollment, error = self._require_active_enrollment(request, workshop)
+        if error:
+            return error
         try:
             cert = services.issue_certificate(enrollment=enrollment)
         except services.WorkshopError as exc:
@@ -752,23 +934,18 @@ class WorkshopViewSet(viewsets.ModelViewSet):
     )
     def get_certificate(self, request, slug=None):
         workshop = self.get_object()
-        enrollment = services.get_active_enrollment(
-            user=request.user, workshop=workshop
-        )
-        if not enrollment:
-            return Response(
-                {"code": "forbidden", "detail": "Active enrollment required."},
-                status=403,
-            )
-        from .models import WorkshopCertificate
-
+        enrollment, error = self._require_active_enrollment(request, workshop)
+        if error:
+            return error
         cert = WorkshopCertificate.objects.filter(enrollment=enrollment).first()
         if not cert:
-            return Response({"detail": "Certificate not issued yet."}, status=404)
+            return _detail("Certificate not issued yet.", 404)
         return Response(WorkshopCertificateSerializer(cert).data)
 
 
 class WorkshopSessionListCreateView(APIView):
+    """Admin curriculum: list/create sessions under a workshop."""
+
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request, workshop_slug):
@@ -805,6 +982,8 @@ class WorkshopSessionDetailView(APIView):
 
 
 class WorkshopResourceListCreateView(APIView):
+    """Admin curriculum: list/create resources, optionally tied to a session."""
+
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request, workshop_slug):
@@ -818,9 +997,7 @@ class WorkshopResourceListCreateView(APIView):
         ser.is_valid(raise_exception=True)
         session = ser.validated_data.get("session")
         if session and session.workshop_id != workshop.id:
-            return Response(
-                {"detail": "Session must belong to this workshop."}, status=400
-            )
+            return _detail("Session must belong to this workshop.")
         resource = WorkshopResource.objects.create(
             workshop=workshop, **ser.validated_data
         )
@@ -840,9 +1017,7 @@ class WorkshopResourceDetailView(APIView):
         ser.is_valid(raise_exception=True)
         session = ser.validated_data.get("session", resource.session)
         if session and session.workshop_id != resource.workshop_id:
-            return Response(
-                {"detail": "Session must belong to this workshop."}, status=400
-            )
+            return _detail("Session must belong to this workshop.")
         ser.save()
         return Response(ser.data)
 
@@ -855,6 +1030,8 @@ class WorkshopResourceDetailView(APIView):
 
 
 class PatientWorkshopEnrollmentView(APIView):
+    """Patient's non-canceled workshop enrollments."""
+
     permission_classes = [IsAuthenticated, IsPatient]
 
     def get(self, request):
@@ -868,6 +1045,8 @@ class PatientWorkshopEnrollmentView(APIView):
 
 
 class TherapistWorkshopListView(APIView):
+    """Workshops the authenticated therapist instructs."""
+
     permission_classes = [IsAuthenticated, IsTherapist]
 
     def get(self, request):
@@ -879,6 +1058,54 @@ class TherapistWorkshopListView(APIView):
         return Response(WorkshopSerializer(qs, many=True).data)
 
 
+class TherapistFinanceView(APIView):
+    """Read-only earnings for the authenticated therapist.
+
+    Sums snapshotted appointment prices for this therapist only.
+    Clinic-wide ledger / SEP figures are never included.
+    """
+
+    permission_classes = [IsAuthenticated, IsTherapist]
+
+    def get(self, request):
+        start_date, end_date, error = _parse_therapist_finance_range(request)
+        if error:
+            return _detail(error)
+        report = services.therapist_finance_report(
+            therapist=request.user.therapist_profile,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return Response(TherapistFinanceReportSerializer(report).data)
+
+
+def _parse_therapist_finance_range(request) -> tuple[date, date, str | None]:
+    today = timezone.localdate()
+    raw_start = request.query_params.get("start_date")
+    raw_end = request.query_params.get("end_date")
+    if raw_start:
+        start_date = parse_date(raw_start)
+        if start_date is None:
+            return today, today, "Invalid start_date. Use YYYY-MM-DD."
+    else:
+        start_date = today.replace(day=1)
+    if raw_end:
+        end_date = parse_date(raw_end)
+        if end_date is None:
+            return today, today, "Invalid end_date. Use YYYY-MM-DD."
+    else:
+        last_day = monthrange(today.year, today.month)[1]
+        end_date = today.replace(day=last_day)
+    if start_date > end_date:
+        return today, today, "start_date must be on or before end_date."
+    return start_date, end_date, None
+
+
+# ===========================================================================
+# CMS
+# ===========================================================================
+
+
 class BlogPostPagination(PageNumberPagination):
     page_size = 9
     page_size_query_param = "page_size"
@@ -886,6 +1113,8 @@ class BlogPostPagination(PageNumberPagination):
 
 
 class BlogPostViewSet(viewsets.ModelViewSet):
+    """Blog. Public sees published posts; admin sees drafts."""
+
     queryset = BlogPost.objects.select_related(
         "author", "author__therapist_profile"
     ).all()
@@ -896,15 +1125,10 @@ class BlogPostViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        if self.action in ("list", "retrieve"):
-            if not (
-                self.request.user.is_authenticated
-                and (
-                    self.request.user.is_staff
-                    or self.request.user.groups.filter(name="psy_admin").exists()
-                )
-            ):
-                return qs.filter(is_published=True)
+        if self.action in ("list", "retrieve") and not _is_clinic_admin(
+            self.request.user
+        ):
+            return qs.filter(is_published=True)
         return qs
 
     def _stamp_published_at(self, serializer):
@@ -933,23 +1157,33 @@ class BlogPostViewSet(viewsets.ModelViewSet):
 
 
 class SitePageViewSet(viewsets.ModelViewSet):
+    """Keyed CMS pages (about, contact, …)."""
+
     queryset = SitePage.objects.all()
     serializer_class = SitePageSerializer
     lookup_field = "key"
     permission_classes = [IsPsyAdminOrReadOnly]
 
 
+# ===========================================================================
+# Support tickets
+# ===========================================================================
+
+
 class TicketViewSet(viewsets.GenericViewSet):
+    """Patient support / withdrawal tickets. Admin sees all; patient sees own."""
+
     permission_classes = [IsAuthenticated]
     serializer_class = TicketSerializer
 
     def get_queryset(self):
         user = self.request.user
         qs = Ticket.objects.prefetch_related("messages")
-        if user.is_staff or user.groups.filter(name="psy_admin").exists():
+        if _is_clinic_admin(user):
             return qs
-        if hasattr(user, "patient_profile"):
-            return qs.filter(patient=user.patient_profile)
+        patient = _patient_profile(user)
+        if patient:
+            return qs.filter(patient=patient)
         return qs.none()
 
     def list(self, request):
@@ -960,12 +1194,12 @@ class TicketViewSet(viewsets.GenericViewSet):
         return Response(TicketSerializer(ticket).data)
 
     def create(self, request):
-        if not hasattr(request.user, "patient_profile"):
-            return Response({"detail": "Patient profile required."}, status=400)
+        patient = _patient_profile(request.user)
+        if not patient:
+            return _detail("Patient profile required.")
         ser = CreateTicketSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
-        patient = request.user.patient_profile
 
         with transaction.atomic():
             ticket = Ticket.objects.create(
@@ -985,10 +1219,7 @@ class TicketViewSet(viewsets.GenericViewSet):
                 bank = data.get("bank_details")
                 key = data.get("idempotency_key") or f"ticket-wd:{ticket.pk}"
                 if not amount or not bank:
-                    return Response(
-                        {"detail": "withdrawal_amount and bank_details required."},
-                        status=400,
-                    )
+                    return _detail("withdrawal_amount and bank_details required.")
                 try:
                     withdrawal = finance_services.create_withdrawal(
                         user=request.user,
@@ -998,7 +1229,7 @@ class TicketViewSet(viewsets.GenericViewSet):
                         idempotency_key=key,
                     )
                 except finance_services.FinanceError as exc:
-                    return Response({"detail": str(exc)}, status=400)
+                    return _detail(str(exc))
                 ticket.withdrawal_ref = f"finance.withdrawal:{withdrawal.pk}"
                 ticket.save(update_fields=["withdrawal_ref", "updated_at"])
 
@@ -1009,8 +1240,8 @@ class TicketViewSet(viewsets.GenericViewSet):
         ticket = get_object_or_404(self.get_queryset(), pk=pk)
         body = request.data.get("body", "").strip()
         if not body:
-            return Response({"detail": "body required"}, status=400)
-        is_staff = request.user.is_staff or request.user.groups.filter(name="psy_admin").exists()
+            return _detail("body required")
+        is_staff = _is_clinic_admin(request.user)
         msg = TicketMessage.objects.create(
             ticket=ticket,
             author=request.user,
@@ -1023,6 +1254,11 @@ class TicketViewSet(viewsets.GenericViewSet):
         return Response(TicketMessageSerializer(msg).data, status=201)
 
 
+# ===========================================================================
+# Bootstrap
+# ===========================================================================
+
+
 class EnsurePsyGroupsView(APIView):
     """Idempotent helper for bootstrapping role groups (admin-only)."""
 
@@ -1030,7 +1266,7 @@ class EnsurePsyGroupsView(APIView):
 
     def post(self, request):
         created = []
-        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+        for name in PSY_ROLE_GROUPS:
             _, was_created = Group.objects.get_or_create(name=name)
             if was_created:
                 created.append(name)

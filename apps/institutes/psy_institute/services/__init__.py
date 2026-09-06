@@ -3,8 +3,16 @@ from .booking import (
     admin_book_appointment,
     book_slot,
     cancel_appointment,
+    complete_appointment,
     confirm_appointment_payment,
     move_appointment,
+)
+from .finance import therapist_finance_report
+from .reviews import (
+    ReviewError,
+    approve_review,
+    create_review,
+    reject_review,
 )
 from .leave import (
     LeaveError,
@@ -36,17 +44,21 @@ from .workshops import (
 __all__ = [
     "BookingError",
     "LeaveError",
+    "ReviewError",
     "SlotError",
     "WorkshopError",
     "admin_book_appointment",
     "approve_leave_request",
+    "approve_review",
     "book_slot",
     "cancel_appointment",
     "cancel_leave_request",
     "cancel_workshop_enrollment",
+    "complete_appointment",
     "confirm_appointment_payment",
     "confirm_workshop_enrollment",
     "create_open_slot",
+    "create_review",
     "delete_open_slot",
     "enroll_in_workshop",
     "get_active_enrollment",
@@ -57,7 +69,9 @@ __all__ = [
     "progress_percent",
     "regenerate_slots_for_therapist",
     "reject_leave_request",
+    "reject_review",
     "seats_remaining",
     "submit_leave_request",
+    "therapist_finance_report",
     "viewer_has_content_access",
 ]

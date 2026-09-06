@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="زمان مراجعه">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" rx="44" fill="url(#bg)"/>
+  <circle cx="1040" cy="120" r="190" fill="rgba(255,255,255,0.16)"/>
+  <circle cx="120" cy="560" r="240" fill="rgba(15,23,42,0.16)"/>
+  <text x="88" y="275" fill="#fff" font-size="72" font-weight="700" font-family="Tahoma, Arial, sans-serif">زمان مراجعه</text>
+  <text x="92" y="365" fill="rgba(255,255,255,0.86)" font-size="36" font-family="Tahoma, Arial, sans-serif">چه وقتی کمک حرفه‌ای بگیریم؟</text>
+  <text x="92" y="505" fill="rgba(255,255,255,0.72)" font-size="28" font-family="Tahoma, Arial, sans-serif">مرکز مشاوره و روان‌شناسی دانشگاه</text>
+</svg>

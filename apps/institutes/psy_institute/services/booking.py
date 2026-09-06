@@ -291,3 +291,16 @@ def admin_book_appointment(
             allow_offline=True,
         )
     raise BookingError("Invalid payment option.")
+
+
+@transaction.atomic
+def complete_appointment(*, appointment: Appointment) -> Appointment:
+    """Mark a confirmed session as completed after it has ended."""
+    appointment = Appointment.objects.select_for_update().get(pk=appointment.pk)
+    if appointment.status != Appointment.Status.CONFIRMED:
+        raise BookingError("Only confirmed appointments can be completed.")
+    if appointment.ends_at > timezone.now():
+        raise BookingError("Appointment has not ended yet.")
+    appointment.status = Appointment.Status.COMPLETED
+    appointment.save(update_fields=["status", "updated_at"])
+    return appointment

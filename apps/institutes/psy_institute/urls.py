@@ -165,6 +165,31 @@ urlpatterns = [
         name="therapist-workshop-list",
     ),
     path(
+        "therapist/reviews/",
+        views.TherapistReviewListView.as_view(),
+        name="therapist-review-list",
+    ),
+    path(
+        "therapist/finance/",
+        views.TherapistFinanceView.as_view(),
+        name="therapist-finance",
+    ),
+    path(
+        "admin/reviews/",
+        admin_api.AdminReviewListView.as_view(),
+        name="admin-review-list",
+    ),
+    path(
+        "admin/reviews/<int:pk>/approve/",
+        admin_api.AdminReviewApproveView.as_view(),
+        name="admin-review-approve",
+    ),
+    path(
+        "admin/reviews/<int:pk>/reject/",
+        admin_api.AdminReviewRejectView.as_view(),
+        name="admin-review-reject",
+    ),
+    path(
         "workshops/<slug:workshop_slug>/sessions/",
         views.WorkshopSessionListCreateView.as_view(),
         name="workshop-session-list",

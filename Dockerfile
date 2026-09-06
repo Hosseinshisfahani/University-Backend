@@ -24,7 +24,8 @@ COPY . .
 RUN chmod +x /app/entrypoint.sh
 
 # Run as non-root user
-RUN useradd -m -u 1001 django \
+RUN mkdir -p /app/media /app/staticfiles \
+    && useradd -m -u 1001 django \
     && chown -R django:django /app
 USER django
 EXPOSE 8000

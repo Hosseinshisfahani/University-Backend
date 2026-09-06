@@ -13,8 +13,10 @@ from django.contrib.auth.models import Group
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
+from apps.institutes.psy_institute.services.finance import therapist_finance_report
+from apps.institutes.psy_institute.views import TherapistFinanceView
 from apps.institutes.psy_institute.models import (
     Appointment,
     AppointmentSlot,
@@ -143,6 +145,203 @@ class TherapistPortalApiTests(TestCase):
         detail = detail_resp.json()
         self.assertEqual(len(detail["recent_appointments"]), 1)
         self.assertEqual(detail["recent_appointments"][0]["id"], self.appointment.id)
+
+
+class TherapistFinanceApiTests(TestCase):
+    def setUp(self):
+        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+            Group.objects.get_or_create(name=name)
+
+        self.therapist_user = User.objects.create_user(
+            username="th_finance", password="Pass1234!"
+        )
+        self.other_user = User.objects.create_user(
+            username="th_other", password="Pass1234!"
+        )
+        self.patient_user = User.objects.create_user(
+            username="pt_finance", password="Pass1234!", first_name="Mina"
+        )
+        self.admin_user = User.objects.create_user(
+            username="ad_finance", password="Pass1234!"
+        )
+        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        self.other_user.groups.add(Group.objects.get(name="psy_therapist"))
+        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+
+        self.therapist = TherapistProfile.objects.create(
+            user=self.therapist_user, display_name="Dr. Finance"
+        )
+        self.other = TherapistProfile.objects.create(
+            user=self.other_user, display_name="Dr. Other"
+        )
+        self.patient = PatientProfile.objects.create(
+            user=self.patient_user, phone="09120001111"
+        )
+        self.session_type = SessionType.objects.create(
+            name="In person 50",
+            slug="in-person-50-finance",
+            modality=SessionType.Modality.IN_PERSON,
+            duration_minutes=50,
+            price=Decimal("400000"),
+        )
+        self.factory = APIRequestFactory()
+
+    def _finance_get(self, user, query=None):
+        request = self.factory.get("/api/v1/psy/therapist/finance/", query or {})
+        force_authenticate(request, user=user)
+        return TherapistFinanceView.as_view()(request)
+
+    def _make_appointment(
+        self,
+        *,
+        therapist,
+        status,
+        starts,
+        price,
+        slot_status=AppointmentSlot.Status.BOOKED,
+    ):
+        slot = AppointmentSlot.objects.create(
+            therapist=therapist,
+            session_type=self.session_type,
+            starts_at=starts,
+            ends_at=starts + timedelta(minutes=50),
+            status=slot_status,
+        )
+        return Appointment.objects.create(
+            slot=slot,
+            patient=self.patient,
+            therapist=therapist,
+            session_type=self.session_type,
+            starts_at=slot.starts_at,
+            ends_at=slot.ends_at,
+            status=status,
+            price_snapshot=price,
+        )
+
+    def test_service_scopes_and_excludes_unpaid_rows(self):
+        now = timezone.now()
+        past = now - timedelta(days=2)
+        future = now + timedelta(days=2)
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            starts=past,
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.CONFIRMED,
+            starts=future,
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.PENDING_PAYMENT,
+            starts=future + timedelta(hours=1),
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.other,
+            status=Appointment.Status.COMPLETED,
+            starts=past,
+            price=Decimal("700000"),
+        )
+        report = therapist_finance_report(
+            therapist=self.therapist,
+            start_date=(now - timedelta(days=7)).date(),
+            end_date=(now + timedelta(days=7)).date(),
+            now=now,
+        )
+        self.assertEqual(report["total_income"], Decimal("800000"))
+        self.assertEqual(report["paid_sessions_count"], 2)
+        self.assertEqual(report["upcoming_potential_revenue"], Decimal("400000"))
+        self.assertEqual(len(report["appointments"]), 2)
+
+    def test_therapist_finance_aggregates_own_earned_sessions(self):
+        now = timezone.now()
+        future = now + timedelta(days=3)
+        past = now - timedelta(days=4)
+        far_past = now - timedelta(days=40)
+
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            starts=past,
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.CONFIRMED,
+            starts=future,
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.PENDING_PAYMENT,
+            starts=future + timedelta(hours=2),
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.CANCELED_BY_PATIENT,
+            starts=past - timedelta(hours=2),
+            price=Decimal("400000"),
+        )
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            starts=far_past,
+            price=Decimal("900000"),
+        )
+        self._make_appointment(
+            therapist=self.other,
+            status=Appointment.Status.COMPLETED,
+            starts=past,
+            price=Decimal("700000"),
+        )
+        blocked = self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.CONFIRMED,
+            starts=past - timedelta(hours=5),
+            price=Decimal("400000"),
+            slot_status=AppointmentSlot.Status.BLOCKED,
+        )
+        self.assertEqual(blocked.slot.status, AppointmentSlot.Status.BLOCKED)
+
+        start = (now - timedelta(days=7)).date().isoformat()
+        end = (now + timedelta(days=7)).date().isoformat()
+        resp = self._finance_get(
+            self.therapist_user, {"start_date": start, "end_date": end}
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.data
+        self.assertEqual(body["total_income"], "800000")
+        self.assertEqual(body["paid_sessions_count"], 2)
+        self.assertEqual(body["upcoming_potential_revenue"], "400000")
+        self.assertEqual(len(body["appointments"]), 2)
+        self.assertEqual(body["appointments"][0]["patient_name"], "Mina")
+        self.assertNotIn("700000", [row["amount"] for row in body["appointments"]])
+        self.assertNotIn("900000", [row["amount"] for row in body["appointments"]])
+
+    def test_therapist_finance_forbidden_for_patient_and_admin(self):
+        self.assertEqual(self._finance_get(self.patient_user).status_code, 403)
+        self.assertEqual(self._finance_get(self.admin_user).status_code, 403)
+
+    def test_therapist_finance_rejects_invalid_range(self):
+        self.assertEqual(
+            self._finance_get(
+                self.therapist_user, {"start_date": "not-a-date"}
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self._finance_get(
+                self.therapist_user,
+                {"start_date": "2026-09-10", "end_date": "2026-09-01"},
+            ).status_code,
+            400,
+        )
 
 
 class AdminPortalApiTests(TestCase):
@@ -1070,4 +1269,203 @@ class AdminCentricSchedulingTests(TestCase):
             format="json",
         )
         self.assertEqual(dup.status_code, 400)
+
+
+class TherapistReviewApiTests(TestCase):
+    def setUp(self):
+        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+            Group.objects.get_or_create(name=name)
+
+        self.admin_user = User.objects.create_user(
+            username="review_admin", password="Pass1234!"
+        )
+        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        self.therapist_user = User.objects.create_user(
+            username="review_th", password="Pass1234!"
+        )
+        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        self.patient_user = User.objects.create_user(
+            username="review_pt", password="Pass1234!", first_name="سارا"
+        )
+        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        self.other_patient_user = User.objects.create_user(
+            username="review_pt2", password="Pass1234!", first_name="رضا"
+        )
+        self.other_patient_user.groups.add(Group.objects.get(name="psy_patient"))
+
+        self.therapist = TherapistProfile.objects.create(
+            user=self.therapist_user,
+            display_name="Dr. Review",
+            is_active=True,
+            is_accepting_patients=True,
+        )
+        self.patient = PatientProfile.objects.create(user=self.patient_user)
+        self.other_patient = PatientProfile.objects.create(user=self.other_patient_user)
+        self.session_type = SessionType.objects.create(
+            name="Review 45",
+            slug="review-45",
+            modality=SessionType.Modality.ONLINE,
+            duration_minutes=45,
+            price=Decimal("100000"),
+        )
+        self.client = APIClient()
+
+    def _make_appointment(self, *, status, ends_delta, patient=None):
+        ends = timezone.now() + ends_delta
+        starts = ends - timedelta(minutes=45)
+        slot = AppointmentSlot.objects.create(
+            therapist=self.therapist,
+            session_type=self.session_type,
+            starts_at=starts,
+            ends_at=ends,
+            status=AppointmentSlot.Status.BOOKED,
+        )
+        return Appointment.objects.create(
+            slot=slot,
+            patient=patient or self.patient,
+            therapist=self.therapist,
+            session_type=self.session_type,
+            starts_at=starts,
+            ends_at=ends,
+            status=status,
+            price_snapshot=self.session_type.price,
+        )
+
+    def test_complete_forbidden_for_patient_and_before_end(self):
+        future = self._make_appointment(
+            status=Appointment.Status.CONFIRMED, ends_delta=timedelta(hours=2)
+        )
+        past = self._make_appointment(
+            status=Appointment.Status.CONFIRMED, ends_delta=timedelta(hours=-1)
+        )
+        url_future = reverse(
+            "psy_institute:appointment-complete", kwargs={"pk": future.pk}
+        )
+        url_past = reverse(
+            "psy_institute:appointment-complete", kwargs={"pk": past.pk}
+        )
+
+        self.client.force_authenticate(self.patient_user)
+        self.assertEqual(self.client.post(url_past).status_code, 403)
+
+        self.client.force_authenticate(self.therapist_user)
+        self.assertEqual(self.client.post(url_future).status_code, 400)
+        ok = self.client.post(url_past)
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json()["status"], "completed")
+
+    def test_review_requires_completed_owner_and_is_unique(self):
+        confirmed = self._make_appointment(
+            status=Appointment.Status.CONFIRMED, ends_delta=timedelta(hours=-1)
+        )
+        completed = self._make_appointment(
+            status=Appointment.Status.COMPLETED, ends_delta=timedelta(hours=-2)
+        )
+        review_url = reverse(
+            "psy_institute:appointment-review", kwargs={"pk": completed.pk}
+        )
+        confirmed_url = reverse(
+            "psy_institute:appointment-review", kwargs={"pk": confirmed.pk}
+        )
+
+        self.client.force_authenticate(self.other_patient_user)
+        self.assertEqual(
+            self.client.post(review_url, {"rating": 5}, format="json").status_code,
+            403,
+        )
+
+        self.client.force_authenticate(self.patient_user)
+        self.assertEqual(
+            self.client.post(confirmed_url, {"rating": 5}, format="json").status_code,
+            400,
+        )
+        created = self.client.post(
+            review_url, {"rating": 4, "body": "عالی بود"}, format="json"
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["text_status"], "pending")
+        dup = self.client.post(review_url, {"rating": 5}, format="json")
+        self.assertEqual(dup.status_code, 400)
+
+    def test_pending_body_hidden_until_admin_approves(self):
+        completed = self._make_appointment(
+            status=Appointment.Status.COMPLETED, ends_delta=timedelta(hours=-3)
+        )
+        self.client.force_authenticate(self.patient_user)
+        created = self.client.post(
+            reverse("psy_institute:appointment-review", kwargs={"pk": completed.pk}),
+            {"rating": 5, "body": "متن در انتظار"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        review_id = created.json()["id"]
+
+        public = self.client.get(
+            reverse("psy_institute:therapist-reviews", kwargs={"pk": self.therapist.pk})
+        )
+        self.assertEqual(public.status_code, 200)
+        self.assertEqual(public.json(), [])
+
+        directory = self.client.get(reverse("psy_institute:therapist-list"))
+        mine = next(t for t in directory.json() if t["id"] == self.therapist.id)
+        self.assertEqual(mine["rating_count"], 1)
+        self.assertEqual(mine["rating_avg"], 5.0)
+
+        self.client.force_authenticate(self.therapist_user)
+        own = self.client.get(reverse("psy_institute:therapist-review-list"))
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(len(own.json()), 1)
+        self.assertEqual(own.json()[0]["rating"], 5)
+        self.assertEqual(own.json()[0]["body"], "")
+        self.assertEqual(own.json()[0]["text_status"], "pending")
+
+        self.client.force_authenticate(self.admin_user)
+        approve = self.client.post(
+            reverse("psy_institute:admin-review-approve", kwargs={"pk": review_id}),
+            {"admin_note": "ok"},
+            format="json",
+        )
+        self.assertEqual(approve.status_code, 200)
+        self.assertEqual(approve.json()["text_status"], "approved")
+
+        public = self.client.get(
+            reverse("psy_institute:therapist-reviews", kwargs={"pk": self.therapist.pk})
+        )
+        self.assertEqual(len(public.json()), 1)
+        self.assertEqual(public.json()[0]["body"], "متن در انتظار")
+        self.assertEqual(public.json()[0]["patient_first_name"], "سارا")
+
+        self.client.force_authenticate(self.therapist_user)
+        own = self.client.get(reverse("psy_institute:therapist-review-list"))
+        self.assertEqual(own.json()[0]["body"], "متن در انتظار")
+
+    def test_rejected_body_stays_hidden(self):
+        completed = self._make_appointment(
+            status=Appointment.Status.COMPLETED, ends_delta=timedelta(hours=-4)
+        )
+        self.client.force_authenticate(self.patient_user)
+        created = self.client.post(
+            reverse("psy_institute:appointment-review", kwargs={"pk": completed.pk}),
+            {"rating": 2, "body": "نامناسب"},
+            format="json",
+        )
+        review_id = created.json()["id"]
+
+        self.client.force_authenticate(self.admin_user)
+        reject = self.client.post(
+            reverse("psy_institute:admin-review-reject", kwargs={"pk": review_id}),
+            {"admin_note": "no"},
+            format="json",
+        )
+        self.assertEqual(reject.status_code, 200)
+        self.assertEqual(reject.json()["text_status"], "rejected")
+
+        public = self.client.get(
+            reverse("psy_institute:therapist-reviews", kwargs={"pk": self.therapist.pk})
+        )
+        self.assertEqual(public.json(), [])
+        directory = self.client.get(reverse("psy_institute:therapist-list"))
+        mine = next(t for t in directory.json() if t["id"] == self.therapist.id)
+        self.assertEqual(mine["rating_count"], 1)
+        self.assertEqual(mine["rating_avg"], 2.0)
 

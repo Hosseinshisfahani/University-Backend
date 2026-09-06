@@ -5,7 +5,7 @@ class PsyInstituteConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.institutes.psy_institute"
     label = "psy_institute"
-    verbose_name = "Psychology Institute"
+    verbose_name = "مؤسسه روان‌شناسی"
 
     def ready(self):
         # Role group names used by permissions.

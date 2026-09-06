@@ -17,6 +17,7 @@ from .models import (
     SitePage,
     TherapistAvailability,
     TherapistProfile,
+    TherapistReview,
     TherapistSessionOffer,
     Ticket,
     TicketMessage,
@@ -60,8 +61,28 @@ class SessionTypeSerializer(serializers.ModelSerializer):
         return slug
 
 
+def _patient_first_name(patient: PatientProfile) -> str:
+    name = (patient.user.first_name or "").strip()
+    return name or "مراجع"
+
+
+def _can_see_review_body(request, review: TherapistReview) -> bool:
+    if review.text_status == TherapistReview.TextStatus.APPROVED:
+        return True
+    user = getattr(request, "user", None) if request else None
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if hasattr(user, "patient_profile") and user.patient_profile.id == review.patient_id:
+        return True
+    if user.is_staff or user.groups.filter(name="psy_admin").exists():
+        return True
+    return False
+
+
 class TherapistProfileSerializer(serializers.ModelSerializer):
     offers = serializers.SerializerMethodField()
+    rating_avg = serializers.SerializerMethodField()
+    rating_count = serializers.SerializerMethodField()
 
     class Meta:
         model = TherapistProfile
@@ -73,7 +94,18 @@ class TherapistProfileSerializer(serializers.ModelSerializer):
             "is_accepting_patients",
             "is_active",
             "offers",
+            "rating_avg",
+            "rating_count",
         ]
+
+    def get_rating_avg(self, obj) -> float | None:
+        avg = getattr(obj, "rating_avg", None)
+        if avg is None:
+            return None
+        return round(float(avg), 2)
+
+    def get_rating_count(self, obj) -> int:
+        return int(getattr(obj, "rating_count", 0) or 0)
 
     def get_offers(self, obj) -> list:
         offers = getattr(obj, "active_offers", None)
@@ -266,6 +298,91 @@ class AdminAppointmentSlotSerializer(AppointmentSlotSerializer):
             return None
 
 
+class TherapistReviewSerializer(serializers.ModelSerializer):
+    patient_first_name = serializers.SerializerMethodField()
+    therapist_name = serializers.CharField(
+        source="therapist.display_name", read_only=True
+    )
+    body = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TherapistReview
+        fields = [
+            "id",
+            "appointment",
+            "patient",
+            "patient_first_name",
+            "therapist",
+            "therapist_name",
+            "rating",
+            "body",
+            "text_status",
+            "admin_note",
+            "created_at",
+            "reviewed_at",
+        ]
+        read_only_fields = fields
+
+    def get_patient_first_name(self, obj: TherapistReview) -> str:
+        return _patient_first_name(obj.patient)
+
+    def get_body(self, obj: TherapistReview) -> str:
+        request = self.context.get("request")
+        if _can_see_review_body(request, obj):
+            return obj.body
+        return ""
+
+
+class PublicTherapistReviewSerializer(serializers.ModelSerializer):
+    patient_first_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TherapistReview
+        fields = [
+            "id",
+            "rating",
+            "body",
+            "patient_first_name",
+            "created_at",
+        ]
+
+    def get_patient_first_name(self, obj: TherapistReview) -> str:
+        return _patient_first_name(obj.patient)
+
+
+class AdminTherapistReviewSerializer(serializers.ModelSerializer):
+    patient_first_name = serializers.SerializerMethodField()
+    therapist_name = serializers.CharField(
+        source="therapist.display_name", read_only=True
+    )
+
+    class Meta:
+        model = TherapistReview
+        fields = [
+            "id",
+            "appointment",
+            "patient",
+            "patient_first_name",
+            "therapist",
+            "therapist_name",
+            "rating",
+            "body",
+            "text_status",
+            "admin_note",
+            "created_at",
+            "reviewed_at",
+        ]
+        read_only_fields = fields
+
+    def get_patient_first_name(self, obj: TherapistReview) -> str:
+        return _patient_first_name(obj.patient)
+
+
+class SubmitTherapistReviewSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+    body = serializers.CharField(required=False, allow_blank=True, default="")
+
+
 class AppointmentSerializer(serializers.ModelSerializer):
     therapist_name = serializers.CharField(
         source="therapist.display_name", read_only=True
@@ -275,6 +392,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
     session_type_modality = serializers.CharField(
         source="session_type.modality", read_only=True
     )
+    review = serializers.SerializerMethodField()
 
     class Meta:
         model = Appointment
@@ -298,6 +416,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
             "refund_policy_applied",
             "meeting_link",
             "created_at",
+            "review",
         ]
         read_only_fields = fields
 
@@ -305,6 +424,15 @@ class AppointmentSerializer(serializers.ModelSerializer):
         user = obj.patient.user
         full = f"{user.first_name} {user.last_name}".strip()
         return full or user.username
+
+    def get_review(self, obj: Appointment):
+        try:
+            review = obj.review
+        except TherapistReview.DoesNotExist:
+            return None
+        if review is None:
+            return None
+        return TherapistReviewSerializer(review, context=self.context).data
 
 
 class SetMeetingLinkSerializer(serializers.Serializer):
@@ -817,3 +945,24 @@ class TherapistPatientDetailSerializer(TherapistPatientSummarySerializer):
     recent_appointments = AppointmentSerializer(many=True)
     recent_notes = SessionNoteSerializer(many=True)
     recent_responses = PsychometricResponseSerializer(many=True)
+
+
+class TherapistFinanceAppointmentSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    starts_at = serializers.DateTimeField()
+    session_type_name = serializers.CharField()
+    patient_id = serializers.IntegerField()
+    patient_name = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=0)
+    status = serializers.CharField()
+
+
+class TherapistFinanceReportSerializer(serializers.Serializer):
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    total_income = serializers.DecimalField(max_digits=12, decimal_places=0)
+    paid_sessions_count = serializers.IntegerField()
+    upcoming_potential_revenue = serializers.DecimalField(
+        max_digits=12, decimal_places=0
+    )
+    appointments = TherapistFinanceAppointmentSerializer(many=True)

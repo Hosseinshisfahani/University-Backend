@@ -34,6 +34,7 @@ from apps.institutes.psy_institute.models import (
     SitePage,
     TherapistAvailability,
     TherapistProfile,
+    TherapistReview,
     TherapistSessionOffer,
     Ticket,
     TicketMessage,
@@ -423,6 +424,7 @@ class Command(BaseCommand):
             therapist, in_person_type, patients
         )
         notes_created = self._seed_session_notes(therapist, appointments)
+        reviews_info = self._seed_reviews(admin_user, appointments)
         responses_created = self._seed_psychometric_responses(
             form, therapist, patients
         )
@@ -448,6 +450,9 @@ class Command(BaseCommand):
         )
         self.stdout.write(
             f"  session_notes_created≈{notes_created}  shared_with_patient={shared_notes}"
+        )
+        self.stdout.write(
+            f"  reviews approved={reviews_info['approved']} pending={reviews_info['pending']}"
         )
         self.stdout.write(
             f"  psychometric form=sample-phq  responses_created≈{responses_created}"
@@ -649,6 +654,13 @@ class Command(BaseCommand):
             },
             {
                 "patient": patients[1] if len(patients) > 1 else patients[0],
+                "starts_at": now - timedelta(days=10, hours=1),
+                "status": Appointment.Status.COMPLETED,
+                "payment_ref": "seed.history:patient2:completed",
+                "meeting_link": "",
+            },
+            {
+                "patient": patients[1] if len(patients) > 1 else patients[0],
                 "starts_at": now - timedelta(days=5, hours=3),
                 "status": Appointment.Status.CANCELED_BY_PATIENT,
                 "payment_ref": "seed.history:patient2:canceled",
@@ -736,6 +748,46 @@ class Command(BaseCommand):
                 )
             )
         return appointments
+
+    def _seed_reviews(self, admin_user, appointments: list[Appointment]) -> dict[str, int]:
+        by_ref = {a.payment_ref: a for a in appointments}
+        approved_appt = by_ref.get("seed.history:patient1:completed")
+        pending_appt = by_ref.get("seed.history:patient2:completed")
+        created = {"approved": 0, "pending": 0}
+
+        if approved_appt and not TherapistReview.objects.filter(
+            appointment=approved_appt
+        ).exists():
+            TherapistReview.objects.create(
+                appointment=approved_appt,
+                patient=approved_appt.patient,
+                therapist=approved_appt.therapist,
+                rating=5,
+                body="جلسه خیلی کمک‌کننده بود و حس امنیت داشتم.",
+                text_status=TherapistReview.TextStatus.APPROVED,
+                reviewed_by=admin_user,
+                reviewed_at=timezone.now(),
+            )
+            created["approved"] = 1
+        elif approved_appt:
+            created["approved"] = 1
+
+        if pending_appt and not TherapistReview.objects.filter(
+            appointment=pending_appt
+        ).exists():
+            TherapistReview.objects.create(
+                appointment=pending_appt,
+                patient=pending_appt.patient,
+                therapist=pending_appt.therapist,
+                rating=4,
+                body="درمانگر دقیق گوش داد؛ منتظر تأیید برای نمایش عمومی.",
+                text_status=TherapistReview.TextStatus.PENDING,
+            )
+            created["pending"] = 1
+        elif pending_appt:
+            created["pending"] = 1
+
+        return created
 
     def _seed_session_notes(
         self,

@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 
 from apps.finance.models import LedgerEntry, Payment, Wallet
 
+from . import services
 from .models import (
     Appointment,
     AppointmentSlot,
@@ -23,11 +24,14 @@ from .models import (
     PsychometricResponse,
     TherapistAvailability,
     TherapistProfile,
+    TherapistReview,
     TherapistSessionOffer,
 )
 from .permissions import IsPsyAdmin
 from .serializers import (
+    AdminTherapistReviewSerializer,
     AppointmentSerializer,
+    LeaveReviewSerializer,
     PsychometricResponseSerializer,
     TherapistProfileSerializer,
 )
@@ -87,6 +91,9 @@ class AdminOverviewView(APIView):
         ).count()
         patients_count = PatientProfile.objects.count()
         therapists_active = TherapistProfile.objects.filter(is_active=True).count()
+        pending_reviews = TherapistReview.objects.filter(
+            text_status=TherapistReview.TextStatus.PENDING
+        ).count()
 
         ledger_week = LedgerEntry.objects.filter(created_at__gte=week_ago)
         capture = ledger_week.filter(
@@ -108,6 +115,7 @@ class AdminOverviewView(APIView):
                 "canceled_this_week": canceled_week,
                 "patients_count": patients_count,
                 "therapists_active_count": therapists_active,
+                "pending_reviews_count": pending_reviews,
                 "revenue_7d": str(capture - refund),
                 "capture_7d": str(capture),
                 "refund_7d": str(refund),
@@ -480,3 +488,55 @@ class AdminFinanceAppointmentRevenueView(APIView):
                 "results": results,
             }
         )
+
+
+class AdminReviewListView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def get(self, request):
+        qs = TherapistReview.objects.select_related(
+            "patient__user", "therapist", "appointment"
+        ).order_by("-created_at")
+        status_param = request.query_params.get("status")
+        therapist = request.query_params.get("therapist")
+        if status_param:
+            qs = qs.filter(text_status=status_param)
+        if therapist:
+            qs = qs.filter(therapist_id=therapist)
+        return Response(AdminTherapistReviewSerializer(qs[:200], many=True).data)
+
+
+class AdminReviewApproveView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def post(self, request, pk: int):
+        review = get_object_or_404(TherapistReview, pk=pk)
+        ser = LeaveReviewSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            review = services.approve_review(
+                review=review,
+                reviewer=request.user,
+                admin_note=ser.validated_data.get("admin_note", ""),
+            )
+        except services.ReviewError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(AdminTherapistReviewSerializer(review).data)
+
+
+class AdminReviewRejectView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def post(self, request, pk: int):
+        review = get_object_or_404(TherapistReview, pk=pk)
+        ser = LeaveReviewSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            review = services.reject_review(
+                review=review,
+                reviewer=request.user,
+                admin_note=ser.validated_data.get("admin_note", ""),
+            )
+        except services.ReviewError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(AdminTherapistReviewSerializer(review).data)
