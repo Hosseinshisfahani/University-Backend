@@ -25,7 +25,10 @@ from apps.institutes.psy_institute.models import (
     Appointment,
     AppointmentSlot,
     BlogPost,
+    ClinicalReport,
+    FileAccessRequest,
     LeaveRequest,
+    NewsSlide,
     PatientProfile,
     PsychometricForm,
     PsychometricResponse,
@@ -213,6 +216,24 @@ MEDIA_FIXTURES = {
         "subtitle": "پیش‌نویس مقاله آموزشی",
         "from": "#1e293b",
         "to": "#475569",
+    },
+    "psy/news/hours-update.svg": {
+        "title": "ساعات کار مرکز",
+        "subtitle": "شنبه تا پنج‌شنبه، ۸ تا ۱۹",
+        "from": "#1c39bb",
+        "to": "#12a8b5",
+    },
+    "psy/news/workshops-open.svg": {
+        "title": "کارگاه‌های جدید",
+        "subtitle": "ثبت‌نام کارگاه‌های بهاره آغاز شد",
+        "from": "#007a8c",
+        "to": "#d4af37",
+    },
+    "psy/news/draft-notice.svg": {
+        "title": "اطلاعیه داخلی",
+        "subtitle": "پیش‌نویس اسلاید اخبار",
+        "from": "#334155",
+        "to": "#64748b",
     },
 }
 
@@ -424,12 +445,16 @@ class Command(BaseCommand):
             therapist, in_person_type, patients
         )
         notes_created = self._seed_session_notes(therapist, appointments)
+        clinical_info = self._seed_clinical_records(
+            admin_user, therapists, patients, session_type, appointments
+        )
         reviews_info = self._seed_reviews(admin_user, appointments)
         responses_created = self._seed_psychometric_responses(
             form, therapist, patients
         )
         workshops_info = self._seed_workshops(therapist, patients, media_paths)
         blog_info = self._seed_blog(therapist.user, admin_user, media_paths)
+        news_info = self._seed_news(media_paths)
         tickets_info = self._seed_tickets(admin_user, patients)
         site_info = self._seed_site_pages(media_paths)
 
@@ -452,6 +477,10 @@ class Command(BaseCommand):
             f"  session_notes_created≈{notes_created}  shared_with_patient={shared_notes}"
         )
         self.stdout.write(
+            f"  clinical_reports={clinical_info['reports']}  "
+            f"file_access={clinical_info['access']}"
+        )
+        self.stdout.write(
             f"  reviews approved={reviews_info['approved']} pending={reviews_info['pending']}"
         )
         self.stdout.write(
@@ -459,6 +488,7 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"  workshops={workshops_info}")
         self.stdout.write(f"  blog={blog_info}")
+        self.stdout.write(f"  news={news_info}")
         self.stdout.write(f"  tickets={tickets_info}")
         self.stdout.write(f"  site_pages={site_info}")
         self.stdout.write(f"  wallet_credit={credit_wallet}")
@@ -842,6 +872,142 @@ class Command(BaseCommand):
 
         return created
 
+    def _seed_clinical_records(
+        self,
+        admin_user,
+        therapists: list[TherapistProfile],
+        patients: list[PatientProfile],
+        session_type: SessionType,
+        appointments: list[Appointment],
+    ) -> dict[str, str]:
+        therapist = therapists[0]
+        other = therapists[1] if len(therapists) > 1 else therapist
+        patient = patients[0]
+        now = timezone.now()
+
+        completed = [
+            a
+            for a in appointments
+            if a.therapist_id == therapist.id
+            and a.status == Appointment.Status.COMPLETED
+        ]
+        reports = 0
+        if completed:
+            primary = completed[0]
+            _, was_created = ClinicalReport.objects.get_or_create(
+                appointment=primary,
+                defaults={
+                    "therapist": therapist,
+                    "patient": primary.patient,
+                    "summary": "جلسه‌ای متمرکز بر مدیریت اضطراب امتحان و تمرین تنفس.",
+                    "assessment": "علائم اضطرابی در محدوده خفیف تا متوسط؛ انگیزه درمان خوب است.",
+                    "treatment_plan": "ادامه CBT هفتگی و تمرین مواجهه تدریجی با موقعیت‌های ارزیابی.",
+                    "risk_flags": [],
+                },
+            )
+            if was_created:
+                reports += 1
+            else:
+                reports += 1
+
+        # Shared-patient appointment so a second therapist can request the master file.
+        other_ref = "seed.clinical:therapist2:patient1:completed"
+        other_appt = Appointment.objects.filter(payment_ref=other_ref).first()
+        if other_appt is None and other.id != therapist.id:
+            starts_at = now - timedelta(days=4, hours=2)
+            ends_at = starts_at + timedelta(minutes=session_type.duration_minutes)
+            slot = AppointmentSlot.objects.create(
+                therapist=other,
+                session_type=session_type,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                status=AppointmentSlot.Status.BOOKED,
+            )
+            other_appt = Appointment.objects.create(
+                slot=slot,
+                patient=patient,
+                therapist=other,
+                session_type=session_type,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                status=Appointment.Status.COMPLETED,
+                price_snapshot=session_type.price,
+                payment_ref=other_ref,
+            )
+        if other_appt:
+            _, was_created = ClinicalReport.objects.get_or_create(
+                appointment=other_appt,
+                defaults={
+                    "therapist": other_appt.therapist,
+                    "patient": other_appt.patient,
+                    "summary": "گزارش درمانگر دوم: پیگیری خلق و الگوی خواب.",
+                    "assessment": "افت خفیف خلق؛ افکار خودآسیب‌رسان انکار شد.",
+                    "treatment_plan": "هماهنگی با درمانگر اصلی و پایش هفتگی خواب.",
+                    "risk_flags": [],
+                },
+            )
+            if was_created:
+                reports += 1
+            else:
+                reports += 1
+
+        access_specs = [
+            {
+                "therapist": other,
+                "patient": patient,
+                "status": FileAccessRequest.Status.PENDING,
+                "reason": "نیاز به مشاهده سوابق برای تداوم درمان.",
+                "expires_at": None,
+                "granted_by": None,
+            },
+            {
+                "therapist": other,
+                "patient": patients[1] if len(patients) > 1 else patient,
+                "status": FileAccessRequest.Status.APPROVED,
+                "reason": "بررسی تاریخچه پیش از شروع کارگاه گروهی.",
+                "expires_at": now + timedelta(days=7),
+                "granted_by": admin_user,
+            },
+            {
+                "therapist": other,
+                "patient": patients[2] if len(patients) > 2 else patient,
+                "status": FileAccessRequest.Status.EXPIRED,
+                "reason": "دسترسی موقت قبلی برای ارزیابی اولیه.",
+                "expires_at": now - timedelta(days=1),
+                "granted_by": admin_user,
+            },
+        ]
+        access_count = 0
+        for spec in access_specs:
+            row, _ = FileAccessRequest.objects.get_or_create(
+                therapist=spec["therapist"],
+                patient=spec["patient"],
+                status=spec["status"],
+                defaults={
+                    "reason": spec["reason"],
+                    "expires_at": spec["expires_at"],
+                    "granted_by": spec["granted_by"],
+                    "decided_at": now if spec["granted_by"] else None,
+                },
+            )
+            if row.reason != spec["reason"] or row.expires_at != spec["expires_at"]:
+                row.reason = spec["reason"]
+                row.expires_at = spec["expires_at"]
+                row.granted_by = spec["granted_by"]
+                row.decided_at = now if spec["granted_by"] else None
+                row.save(
+                    update_fields=[
+                        "reason",
+                        "expires_at",
+                        "granted_by",
+                        "decided_at",
+                        "updated_at",
+                    ]
+                )
+            access_count += 1
+
+        return {"reports": str(reports), "access": str(access_count)}
+
     def _seed_psychometric_responses(
         self,
         form: PsychometricForm,
@@ -1190,6 +1356,51 @@ class Command(BaseCommand):
             )
         published = BlogPost.objects.filter(is_published=True).count()
         return f"published={published} draft=draft-sleep-hygiene"
+
+    def _seed_news(self, media_paths: dict[str, str]) -> str:
+        slides = [
+            {
+                "title": "ساعات کار مرکز مشاوره آیه",
+                "body": "مرکز از شنبه تا پنج‌شنبه، ۸ تا ۱۹ پذیرای مراجعان است. برای رزرو جلسه وارد پورتال شوید.",
+                "image": media_paths["psy/news/hours-update.svg"],
+                "link_url": "/register",
+                "link_label": "رزرو نوبت",
+                "sort_order": 1,
+                "is_published": True,
+            },
+            {
+                "title": "ثبت‌نام کارگاه‌های بهاره آغاز شد",
+                "body": "کارگاه مهارت‌های اضطراب و ذهن‌آگاهی با ظرفیت محدود برگزار می‌شود.",
+                "image": media_paths["psy/news/workshops-open.svg"],
+                "link_url": "/psy/workshops",
+                "link_label": "مشاهده کارگاه‌ها",
+                "sort_order": 2,
+                "is_published": True,
+            },
+            {
+                "title": "اطلاعیه داخلی",
+                "body": "این اسلاید پیش‌نویس است و در صفحه عمومی دیده نمی‌شود.",
+                "image": media_paths["psy/news/draft-notice.svg"],
+                "link_url": "",
+                "link_label": "",
+                "sort_order": 99,
+                "is_published": False,
+            },
+        ]
+        for spec in slides:
+            NewsSlide.objects.update_or_create(
+                title=spec["title"],
+                defaults={
+                    "body": spec["body"],
+                    "image": spec["image"],
+                    "link_url": spec["link_url"],
+                    "link_label": spec["link_label"],
+                    "sort_order": spec["sort_order"],
+                    "is_published": spec["is_published"],
+                },
+            )
+        published = NewsSlide.objects.filter(is_published=True).count()
+        return f"published={published} draft=اطلاعیه داخلی"
 
     def _seed_tickets(self, admin_user, patients: list[PatientProfile]) -> str:
         specs = [

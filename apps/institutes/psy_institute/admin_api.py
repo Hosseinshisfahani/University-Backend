@@ -20,6 +20,7 @@ from . import services
 from .models import (
     Appointment,
     AppointmentSlot,
+    ClinicalReport,
     PatientProfile,
     PsychometricResponse,
     TherapistAvailability,
@@ -31,6 +32,7 @@ from .permissions import IsPsyAdmin
 from .serializers import (
     AdminTherapistReviewSerializer,
     AppointmentSerializer,
+    ClinicalReportSerializer,
     LeaveReviewSerializer,
     PsychometricResponseSerializer,
     TherapistProfileSerializer,
@@ -190,6 +192,16 @@ class AdminPatientDetailView(APIView):
             .select_related("form", "patient", "patient__user", "routed_therapist")
             .order_by("-submitted_at")[:10]
         )
+        clinical_reports = (
+            ClinicalReport.objects.filter(patient=patient)
+            .select_related(
+                "appointment",
+                "appointment__session_type",
+                "therapist",
+                "patient__user",
+            )
+            .order_by("-created_at")
+        )
         return Response(
             {
                 "id": patient.id,
@@ -210,6 +222,9 @@ class AdminPatientDetailView(APIView):
                 ).data,
                 "recent_responses": PsychometricResponseSerializer(
                     recent_responses, many=True
+                ).data,
+                "clinical_reports": ClinicalReportSerializer(
+                    clinical_reports, many=True
                 ).data,
             }
         )

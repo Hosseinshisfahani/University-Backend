@@ -21,6 +21,7 @@ from apps.institutes.psy_institute.models import (
     Appointment,
     AppointmentSlot,
     AvailabilityException,
+    FileAccessRequest,
     PatientProfile,
     SessionType,
     TherapistAvailability,
@@ -96,7 +97,7 @@ class TherapistPortalApiTests(TestCase):
         )
         self.client = APIClient()
 
-    def test_set_meeting_link_as_therapist(self):
+    def test_set_meeting_link_forbidden_for_therapist(self):
         self.client.force_authenticate(self.therapist_user)
         url = reverse(
             "psy_institute:appointment-set-meeting-link",
@@ -105,15 +106,9 @@ class TherapistPortalApiTests(TestCase):
         response = self.client.post(
             url, {"meeting_link": "https://meet.google.com/abc-defg-hij"}, format="json"
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["meeting_link"], "https://meet.google.com/abc-defg-hij"
-        )
-        self.assertEqual(response.json()["session_type_modality"], "online")
+        self.assertEqual(response.status_code, 403)
         self.appointment.refresh_from_db()
-        self.assertEqual(
-            self.appointment.meeting_link, "https://meet.google.com/abc-defg-hij"
-        )
+        self.assertEqual(self.appointment.meeting_link, "")
 
     def test_set_meeting_link_forbidden_for_patient(self):
         self.client.force_authenticate(self.patient_user)
@@ -464,6 +459,24 @@ class AdminPortalApiTests(TestCase):
         self.assertEqual(self.appointment.slot_id, self.slot.id)
         self.assertEqual(self.slot.status, AppointmentSlot.Status.BLOCKED)
 
+    def test_set_meeting_link_as_admin(self):
+        self.client.force_authenticate(self.admin_user)
+        url = reverse(
+            "psy_institute:appointment-set-meeting-link",
+            kwargs={"pk": self.appointment.pk},
+        )
+        response = self.client.post(
+            url, {"meeting_link": "https://meet.google.com/abc-defg-hij"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["meeting_link"], "https://meet.google.com/abc-defg-hij"
+        )
+        self.appointment.refresh_from_db()
+        self.assertEqual(
+            self.appointment.meeting_link, "https://meet.google.com/abc-defg-hij"
+        )
+
     def test_admin_endpoints_forbidden_for_patient(self):
         self.client.force_authenticate(self.patient_user)
         resp = self.client.get(reverse("psy_institute:admin-overview"))
@@ -798,6 +811,92 @@ class BlogPostApiTests(TestCase):
         self.assertTrue(data["is_published"])
         self.assertIsNotNone(data["published_at"])
         self.assertEqual(data["author_name"], "blog_admin")
+
+
+class NewsSlideApiTests(TestCase):
+    def setUp(self):
+        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+            Group.objects.get_or_create(name=name)
+
+        self.admin = User.objects.create_user(username="news_admin", password="x")
+        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        self.admin.is_staff = True
+        self.admin.save()
+
+        from apps.institutes.psy_institute.models import NewsSlide
+
+        self.published = NewsSlide.objects.create(
+            title="Published Slide",
+            body="Welcome to the center",
+            link_url="/psy/blog/published-post",
+            link_label="بیشتر",
+            sort_order=1,
+            is_published=True,
+        )
+        self.draft = NewsSlide.objects.create(
+            title="Draft Slide",
+            body="secret",
+            sort_order=0,
+            is_published=False,
+        )
+        self.client = APIClient()
+
+    def test_anonymous_list_hides_drafts(self):
+        url = reverse("psy_institute:news-list")
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["title"], "Published Slide")
+        self.assertEqual(body[0]["link_url"], "/psy/blog/published-post")
+
+    def test_anonymous_cannot_retrieve_draft(self):
+        url = reverse("psy_institute:news-detail", kwargs={"pk": self.draft.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_admin_create_and_list_includes_drafts(self):
+        self.client.force_authenticate(self.admin)
+        url = reverse("psy_institute:news-list")
+        resp = self.client.post(
+            url,
+            {
+                "title": "New Slide",
+                "body": "Hours update",
+                "is_published": True,
+                "sort_order": 2,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertTrue(data["is_published"])
+        self.assertEqual(data["title"], "New Slide")
+
+        listed = self.client.get(url)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()), 3)
+
+    def test_admin_patch_ignores_existing_image_url(self):
+        self.client.force_authenticate(self.admin)
+        url = reverse("psy_institute:news-detail", kwargs={"pk": self.published.pk})
+        resp = self.client.patch(
+            url,
+            {
+                "title": "Hours update",
+                "body": "Open Saturday to Thursday",
+                "image": "http://127.0.0.1:8000/media/psy/news/hours-update.svg",
+                "link_url": "/register",
+                "link_label": "رزرو نوبت",
+                "sort_order": 1,
+                "is_published": True,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["title"], "Hours update")
+        self.assertEqual(data["body"], "Open Saturday to Thursday")
 
 
 class AdminCentricSchedulingTests(TestCase):
@@ -1468,4 +1567,208 @@ class TherapistReviewApiTests(TestCase):
         mine = next(t for t in directory.json() if t["id"] == self.therapist.id)
         self.assertEqual(mine["rating_count"], 1)
         self.assertEqual(mine["rating_avg"], 2.0)
+
+
+class ClinicalRecordsApiTests(TestCase):
+    def setUp(self):
+        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+            Group.objects.get_or_create(name=name)
+
+        self.admin_user = User.objects.create_user(
+            username="ehr_admin", password="Pass1234!", is_staff=True
+        )
+        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        self.therapist_user = User.objects.create_user(
+            username="ehr_th1", password="Pass1234!", first_name="Sara"
+        )
+        self.other_th_user = User.objects.create_user(
+            username="ehr_th2", password="Pass1234!", first_name="Nima"
+        )
+        self.patient_user = User.objects.create_user(
+            username="ehr_pt", password="Pass1234!", first_name="Ali"
+        )
+        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        self.other_th_user.groups.add(Group.objects.get(name="psy_therapist"))
+        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+
+        self.therapist = TherapistProfile.objects.create(
+            user=self.therapist_user, display_name="Dr. Sara"
+        )
+        self.other_therapist = TherapistProfile.objects.create(
+            user=self.other_th_user, display_name="Dr. Nima"
+        )
+        self.patient = PatientProfile.objects.create(user=self.patient_user)
+        self.session_type = SessionType.objects.create(
+            name="EHR 45",
+            slug="ehr-45",
+            modality=SessionType.Modality.ONLINE,
+            duration_minutes=45,
+            price=Decimal("100000"),
+        )
+        self.client = APIClient()
+
+    def _make_appointment(self, *, therapist, status, ends_delta):
+        ends = timezone.now() + ends_delta
+        starts = ends - timedelta(minutes=45)
+        slot = AppointmentSlot.objects.create(
+            therapist=therapist,
+            session_type=self.session_type,
+            starts_at=starts,
+            ends_at=ends,
+            status=AppointmentSlot.Status.BOOKED,
+        )
+        return Appointment.objects.create(
+            slot=slot,
+            patient=self.patient,
+            therapist=therapist,
+            session_type=self.session_type,
+            starts_at=starts,
+            ends_at=ends,
+            status=status,
+            price_snapshot=self.session_type.price,
+        )
+
+    def _report_payload(self, appointment_id):
+        return {
+            "appointment": appointment_id,
+            "summary": "خلاصه جلسه آزمایشی",
+            "assessment": "ارزیابی آزمایشی",
+            "treatment_plan": "طرح درمان آزمایشی",
+            "risk_flags": [],
+        }
+
+    def test_report_requires_owner_completed_and_is_unique(self):
+        confirmed = self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.CONFIRMED,
+            ends_delta=timedelta(hours=-1),
+        )
+        completed = self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            ends_delta=timedelta(hours=-2),
+        )
+        url = reverse("psy_institute:clinical-report-list")
+
+        self.client.force_authenticate(self.patient_user)
+        self.assertEqual(
+            self.client.post(url, self._report_payload(completed.pk), format="json").status_code,
+            403,
+        )
+
+        self.client.force_authenticate(self.other_th_user)
+        self.assertEqual(
+            self.client.post(url, self._report_payload(completed.pk), format="json").status_code,
+            400,
+        )
+
+        self.client.force_authenticate(self.therapist_user)
+        self.assertEqual(
+            self.client.post(url, self._report_payload(confirmed.pk), format="json").status_code,
+            400,
+        )
+        created = self.client.post(
+            url, self._report_payload(completed.pk), format="json"
+        )
+        self.assertEqual(created.status_code, 201)
+        duplicate = self.client.post(
+            url, self._report_payload(completed.pk), format="json"
+        )
+        self.assertEqual(duplicate.status_code, 400)
+
+        self.client.force_authenticate(self.patient_user)
+        listed = self.client.get(url)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json(), [])
+
+    def test_missing_reports_and_banner_payload(self):
+        self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            ends_delta=timedelta(hours=-3),
+        )
+        self._make_appointment(
+            therapist=self.other_therapist,
+            status=Appointment.Status.COMPLETED,
+            ends_delta=timedelta(hours=-4),
+        )
+        url = reverse("psy_institute:clinical-report-missing")
+
+        self.client.force_authenticate(self.therapist_user)
+        mine = self.client.get(url)
+        self.assertEqual(mine.status_code, 200)
+        self.assertEqual(mine.json()["count"], 1)
+
+        self.client.force_authenticate(self.admin_user)
+        all_missing = self.client.get(url)
+        self.assertEqual(all_missing.json()["count"], 2)
+
+    def test_file_access_approve_expires_and_gates_history(self):
+        own = self._make_appointment(
+            therapist=self.therapist,
+            status=Appointment.Status.COMPLETED,
+            ends_delta=timedelta(hours=-2),
+        )
+        other = self._make_appointment(
+            therapist=self.other_therapist,
+            status=Appointment.Status.COMPLETED,
+            ends_delta=timedelta(hours=-3),
+        )
+        self.client.force_authenticate(self.therapist_user)
+        self.client.post(
+            reverse("psy_institute:clinical-report-list"),
+            self._report_payload(own.pk),
+            format="json",
+        )
+        self.client.force_authenticate(self.other_th_user)
+        self.client.post(
+            reverse("psy_institute:clinical-report-list"),
+            self._report_payload(other.pk),
+            format="json",
+        )
+
+        detail_url = reverse(
+            "psy_institute:therapist-patient-detail", kwargs={"pk": self.patient.pk}
+        )
+        self.client.force_authenticate(self.other_th_user)
+        before = self.client.get(detail_url).json()
+        self.assertFalse(before["has_full_file_access"])
+        self.assertEqual(before["other_therapists_report_count"], 1)
+        self.assertEqual(len(before["clinical_reports"]), 1)
+
+        create_req = self.client.post(
+            reverse("psy_institute:file-access-request-list"),
+            {"patient": self.patient.pk, "reason": "need history"},
+            format="json",
+        )
+        self.assertEqual(create_req.status_code, 201)
+        req_id = create_req.json()["id"]
+        dup = self.client.post(
+            reverse("psy_institute:file-access-request-list"),
+            {"patient": self.patient.pk, "reason": "again"},
+            format="json",
+        )
+        self.assertEqual(dup.status_code, 400)
+
+        self.client.force_authenticate(self.admin_user)
+        approved = self.client.post(
+            reverse(
+                "psy_institute:file-access-request-approve", kwargs={"pk": req_id}
+            ),
+            {"access_days": 7},
+            format="json",
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "approved")
+
+        self.client.force_authenticate(self.other_th_user)
+        after = self.client.get(detail_url).json()
+        self.assertTrue(after["has_full_file_access"])
+        self.assertEqual(len(after["clinical_reports"]), 2)
+
+        expired_view = self.client.get(detail_url).json()
+        self.assertFalse(expired_view["has_full_file_access"])
+        self.assertEqual(len(expired_view["clinical_reports"]), 1)
+        row.refresh_from_db()
+        self.assertEqual(row.status, FileAccessRequest.Status.EXPIRED)
 

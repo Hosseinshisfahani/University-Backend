@@ -36,6 +36,14 @@ router.register(
 router.register("appointments", views.AppointmentViewSet, basename="appointment")
 router.register("session-notes", views.SessionNoteViewSet, basename="session-note")
 router.register(
+    "clinical-reports", views.ClinicalReportViewSet, basename="clinical-report"
+)
+router.register(
+    "file-access-requests",
+    views.FileAccessRequestViewSet,
+    basename="file-access-request",
+)
+router.register(
     "psychometric-forms",
     views.PsychometricFormViewSet,
     basename="psychometric-form",
@@ -47,6 +55,7 @@ router.register(
 )
 router.register("workshops", views.WorkshopViewSet, basename="workshop")
 router.register("blog", views.BlogPostViewSet, basename="blog")
+router.register("news", views.NewsSlideViewSet, basename="news")
 router.register("pages", views.SitePageViewSet, basename="page")
 router.register("tickets", views.TicketViewSet, basename="ticket")
 

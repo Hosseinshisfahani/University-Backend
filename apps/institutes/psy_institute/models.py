@@ -515,6 +515,116 @@ class SessionNote(TimeStampedModel):
 
 
 # ===========================================================================
+# Clinical records (private EHR — never visible to patients)
+# ===========================================================================
+
+
+class ClinicalReport(TimeStampedModel):
+    """Mandatory private report after a completed appointment.
+
+    Distinct from ``SessionNote``. Patients never see this record.
+    """
+
+    appointment = models.OneToOneField(
+        Appointment,
+        on_delete=models.PROTECT,
+        related_name="clinical_report",
+        verbose_name="نوبت",
+    )
+    therapist = models.ForeignKey(
+        TherapistProfile,
+        on_delete=models.PROTECT,
+        related_name="clinical_reports",
+        verbose_name="درمانگر",
+    )
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.PROTECT,
+        related_name="clinical_reports",
+        verbose_name="مراجع",
+    )
+    summary = models.TextField(verbose_name="خلاصه جلسه")
+    assessment = models.TextField(verbose_name="ارزیابی بالینی")
+    treatment_plan = models.TextField(verbose_name="طرح درمان")
+    risk_flags = models.JSONField(
+        default=list, blank=True, verbose_name="پرچم‌های خطر"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "گزارش بالینی"
+        verbose_name_plural = "گزارش‌های بالینی"
+        indexes = [
+            models.Index(fields=["patient", "-created_at"]),
+            models.Index(fields=["therapist", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ClinicalReport<{self.pk}> appt={self.appointment_id}"
+
+
+class FileAccessRequest(TimeStampedModel):
+    """Therapist request for temporary access to a patient's master file."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    therapist = models.ForeignKey(
+        TherapistProfile,
+        on_delete=models.CASCADE,
+        related_name="file_access_requests",
+        verbose_name="درمانگر",
+    )
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.CASCADE,
+        related_name="file_access_requests",
+        verbose_name="مراجع",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+        verbose_name="وضعیت",
+    )
+    reason = models.TextField(blank=True, verbose_name="دلیل")
+    decision_note = models.TextField(blank=True, verbose_name="یادداشت تصمیم")
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="granted_file_access_requests",
+        verbose_name="تأییدکننده",
+    )
+    decided_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="تاریخ تصمیم"
+    )
+    expires_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="انقضا"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "درخواست دسترسی پرونده"
+        verbose_name_plural = "درخواست‌های دسترسی پرونده"
+        indexes = [
+            models.Index(fields=["patient", "status"]),
+            models.Index(fields=["therapist", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"FileAccess<{self.pk}> t={self.therapist_id} "
+            f"p={self.patient_id} ({self.status})"
+        )
+
+
+# ===========================================================================
 # Psychometrics
 # ===========================================================================
 
@@ -867,6 +977,41 @@ class BlogPost(TimeStampedModel):
         ordering = ["-published_at", "-created_at"]
         verbose_name = "مقاله"
         verbose_name_plural = "مقالات"
+
+
+class NewsSlide(TimeStampedModel):
+    """Landing carousel slide. Drafts stay hidden until ``is_published`` is set."""
+
+    title = models.CharField(max_length=200, verbose_name="عنوان")
+    body = models.TextField(blank=True, verbose_name="متن")
+    image = models.ImageField(
+        upload_to="psy/news/",
+        blank=True,
+        max_length=500,
+        verbose_name="تصویر",
+    )
+    link_url = models.CharField(
+        max_length=500,
+        blank=True,
+        verbose_name="لینک",
+        help_text="Internal path or absolute URL.",
+    )
+    link_label = models.CharField(
+        max_length=80, blank=True, verbose_name="متن دکمه"
+    )
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="ترتیب")
+    is_published = models.BooleanField(default=False, verbose_name="منتشر شده")
+
+    class Meta:
+        ordering = ["sort_order", "-created_at"]
+        verbose_name = "اسلاید اخبار"
+        verbose_name_plural = "اسلایدهای اخبار"
+        indexes = [
+            models.Index(fields=["is_published", "sort_order"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.title
 
 
 class SitePage(TimeStampedModel):

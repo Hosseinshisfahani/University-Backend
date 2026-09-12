@@ -34,7 +34,10 @@ from .models import (
     Appointment,
     AppointmentSlot,
     BlogPost,
+    ClinicalReport,
+    FileAccessRequest,
     LeaveRequest,
+    NewsSlide,
     PatientProfile,
     PsychometricForm,
     PsychometricResponse,
@@ -61,11 +64,17 @@ from .serializers import (
     BookAppointmentSerializer,
     CancelAppointmentSerializer,
     CancelWorkshopEnrollmentSerializer,
+    ClinicalReportSerializer,
     ConfirmAppointmentSerializer,
     ConfirmWorkshopEnrollmentSerializer,
     CreateTicketSerializer,
+    FileAccessRequestSerializer,
     LeaveRequestSerializer,
+    MissingReportAppointmentSerializer,
     MoveAppointmentSerializer,
+    ApproveFileAccessSerializer,
+    RejectFileAccessSerializer,
+    NewsSlideSerializer,
     PsychometricFormSerializer,
     PsychometricResponseSerializer,
     PublicTherapistReviewSerializer,
@@ -364,7 +373,32 @@ class TherapistPatientViewSet(viewsets.GenericViewSet):
             .select_related("form", "patient", "patient__user", "routed_therapist")
             .order_by("-submitted_at")[:20]
         )
-        # Nested collections are already rendered dicts; do not re-run ModelSerializers.
+        services.sync_expired_access_requests(
+            FileAccessRequest.objects.filter(therapist=therapist, patient=patient)
+        )
+        full_access = services.has_full_file_access(
+            therapist=therapist, patient=patient
+        )
+        reports_qs = ClinicalReport.objects.filter(patient=patient).select_related(
+            "appointment", "appointment__session_type", "therapist", "patient__user"
+        )
+        if not full_access:
+            reports_qs = reports_qs.filter(therapist=therapist)
+        clinical_reports = reports_qs.order_by("-created_at")
+        other_count = (
+            ClinicalReport.objects.filter(patient=patient)
+            .exclude(therapist=therapist)
+            .count()
+        )
+        pending_request = (
+            FileAccessRequest.objects.filter(
+                therapist=therapist,
+                patient=patient,
+                status=FileAccessRequest.Status.PENDING,
+            )
+            .select_related("therapist", "patient__user", "granted_by")
+            .first()
+        )
         return Response(
             {
                 **summary,
@@ -375,6 +409,16 @@ class TherapistPatientViewSet(viewsets.GenericViewSet):
                 "recent_responses": PsychometricResponseSerializer(
                     recent_responses, many=True
                 ).data,
+                "clinical_reports": ClinicalReportSerializer(
+                    clinical_reports, many=True
+                ).data,
+                "has_full_file_access": full_access,
+                "pending_file_access_request": (
+                    FileAccessRequestSerializer(pending_request).data
+                    if pending_request
+                    else None
+                ),
+                "other_therapists_report_count": other_count,
             }
         )
 
@@ -532,9 +576,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     @action(detail=True, methods=["post"])
     def set_meeting_link(self, request, pk=None):
         appt = get_object_or_404(self.get_queryset(), pk=pk)
-        therapist = _therapist_profile(request.user)
-        is_owner_therapist = therapist and appt.therapist_id == therapist.id
-        if not (is_owner_therapist or _is_clinic_admin(request.user)):
+        if not _is_clinic_admin(request.user):
             return _forbidden()
         ser = SetMeetingLinkSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -661,6 +703,164 @@ class SessionNoteViewSet(viewsets.ModelViewSet):
         if appointment.therapist_id != therapist.id:
             raise serializers.ValidationError("Not your appointment.")
         serializer.save(author=therapist)
+
+
+# ===========================================================================
+# Clinical reports & file access (private EHR)
+# ===========================================================================
+
+
+class ClinicalReportViewSet(viewsets.ModelViewSet):
+    """Private clinical reports. Patients never see this collection."""
+
+    serializer_class = ClinicalReportSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), IsTherapist()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = ClinicalReport.objects.select_related(
+            "appointment",
+            "appointment__session_type",
+            "therapist",
+            "patient__user",
+        )
+        if _is_clinic_admin(user):
+            return qs
+        therapist = _therapist_profile(user)
+        if therapist:
+            granted_ids = services.patients_with_full_file_access(therapist=therapist)
+            return qs.filter(Q(therapist=therapist) | Q(patient_id__in=granted_ids))
+        return qs.none()
+
+    def create(self, request, *args, **kwargs):
+        ser = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            report = services.submit_clinical_report(
+                therapist=request.user.therapist_profile,
+                appointment=ser.validated_data["appointment"],
+                summary=ser.validated_data["summary"],
+                assessment=ser.validated_data["assessment"],
+                treatment_plan=ser.validated_data["treatment_plan"],
+                risk_flags=ser.validated_data.get("risk_flags") or [],
+            )
+        except services.ClinicalRecordError as exc:
+            return _detail(str(exc))
+        out = ClinicalReportSerializer(report, context={"request": request})
+        return Response(out.data, status=201)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        report = serializer.instance
+        therapist = _therapist_profile(user)
+        if not _is_clinic_admin(user) and (
+            not therapist or report.therapist_id != therapist.id
+        ):
+            raise PermissionDenied("You can only edit your own clinical reports.")
+        serializer.save()
+
+    @action(detail=False, methods=["get"], url_path="missing")
+    def missing(self, request):
+        user = request.user
+        therapist = None
+        if not _is_clinic_admin(user):
+            therapist = _therapist_profile(user)
+            if not therapist:
+                return _forbidden()
+        items = services.missing_report_appointments(therapist=therapist)
+        data = MissingReportAppointmentSerializer(items, many=True).data
+        return Response({"count": len(data), "items": data})
+
+
+class FileAccessRequestViewSet(viewsets.GenericViewSet):
+    """Therapist requests temporary master-file access; admin approves."""
+
+    serializer_class = FileAccessRequestSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsAuthenticated(), IsTherapist()]
+        if self.action in ("approve", "reject"):
+            return [IsAuthenticated(), IsPsyAdmin()]
+        return super().get_permissions()
+
+    def get_queryset(self):
+        services.sync_expired_access_requests()
+        user = self.request.user
+        qs = FileAccessRequest.objects.select_related(
+            "therapist", "patient__user", "granted_by"
+        )
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            qs = qs.filter(status=status_param)
+        if _is_clinic_admin(user):
+            return qs
+        therapist = _therapist_profile(user)
+        if therapist:
+            return qs.filter(therapist=therapist)
+        return qs.none()
+
+    def list(self, request):
+        qs = self.get_queryset()
+        return Response(FileAccessRequestSerializer(qs[:200], many=True).data)
+
+    def retrieve(self, request, pk=None):
+        row = get_object_or_404(self.get_queryset(), pk=pk)
+        return Response(FileAccessRequestSerializer(row).data)
+
+    def create(self, request):
+        ser = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            row = services.submit_file_access_request(
+                therapist=request.user.therapist_profile,
+                patient=ser.validated_data["patient"],
+                reason=ser.validated_data.get("reason", ""),
+            )
+        except services.ClinicalRecordError as exc:
+            return _detail(str(exc))
+        return Response(
+            FileAccessRequestSerializer(row).data,
+            status=201,
+        )
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        row = get_object_or_404(FileAccessRequest, pk=pk)
+        ser = ApproveFileAccessSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            row = services.approve_file_access_request(
+                request=row,
+                admin_user=request.user,
+                access_days=ser.validated_data.get("access_days", 7),
+            )
+        except services.ClinicalRecordError as exc:
+            return _detail(str(exc))
+        return Response(FileAccessRequestSerializer(row).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        row = get_object_or_404(FileAccessRequest, pk=pk)
+        ser = RejectFileAccessSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            row = services.reject_file_access_request(
+                request=row,
+                admin_user=request.user,
+                decision_note=ser.validated_data.get("decision_note", ""),
+            )
+        except services.ClinicalRecordError as exc:
+            return _detail(str(exc))
+        return Response(FileAccessRequestSerializer(row).data)
 
 
 # ===========================================================================
@@ -1154,6 +1354,22 @@ class BlogPostViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         self._stamp_published_at(serializer)
         serializer.save()
+
+
+class NewsSlideViewSet(viewsets.ModelViewSet):
+    """Landing news slider. Public sees published slides; admin sees drafts."""
+
+    queryset = NewsSlide.objects.all()
+    serializer_class = NewsSlideSerializer
+    permission_classes = [IsPsyAdminOrReadOnly]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action in ("list", "retrieve") and not _is_clinic_admin(
+            self.request.user
+        ):
+            return qs.filter(is_published=True)
+        return qs
 
 
 class SitePageViewSet(viewsets.ModelViewSet):

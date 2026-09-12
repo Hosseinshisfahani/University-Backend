@@ -57,6 +57,13 @@ class BlogPostAdmin(admin.ModelAdmin):
     prepopulated_fields = {"slug": ("title",)}
 
 
+@admin.register(models.NewsSlide)
+class NewsSlideAdmin(admin.ModelAdmin):
+    list_display = ("title", "sort_order", "is_published", "updated_at")
+    list_editable = ("sort_order", "is_published")
+    list_filter = ("is_published",)
+
+
 @admin.register(models.Ticket)
 class TicketAdmin(admin.ModelAdmin):
     list_display = ("id", "patient", "type", "subject", "status", "created_at")
@@ -68,6 +75,42 @@ admin.site.register(models.AvailabilityException)
 admin.site.register(models.LeaveRequest)
 admin.site.register(models.TherapistReview)
 admin.site.register(models.SessionNote)
+
+
+@admin.register(models.ClinicalReport)
+class ClinicalReportAdmin(admin.ModelAdmin):
+    list_display = ("id", "appointment", "therapist", "patient", "created_at")
+    list_filter = ("therapist",)
+    search_fields = (
+        "patient__user__username",
+        "therapist__display_name",
+        "summary",
+    )
+    readonly_fields = ("therapist", "patient", "appointment", "created_at", "updated_at")
+
+
+@admin.register(models.FileAccessRequest)
+class FileAccessRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "therapist",
+        "patient",
+        "status",
+        "granted_by",
+        "expires_at",
+        "created_at",
+    )
+    list_filter = ("status",)
+    search_fields = ("therapist__display_name", "patient__user__username")
+    readonly_fields = (
+        "therapist",
+        "patient",
+        "granted_by",
+        "decided_at",
+        "expires_at",
+        "created_at",
+        "updated_at",
+    )
 admin.site.register(models.PsychometricResponse)
 admin.site.register(models.WorkshopEnrollment)
 admin.site.register(models.WorkshopCertificate)

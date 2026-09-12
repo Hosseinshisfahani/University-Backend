@@ -8,7 +8,10 @@ from .models import (
     AppointmentSlot,
     AvailabilityException,
     BlogPost,
+    ClinicalReport,
+    FileAccessRequest,
     LeaveRequest,
+    NewsSlide,
     PatientProfile,
     PsychometricForm,
     PsychometricResponse,
@@ -488,6 +491,151 @@ class SessionNoteSerializer(serializers.ModelSerializer):
         ]
 
 
+def _profile_display_name(patient: PatientProfile) -> str:
+    user = patient.user
+    full = f"{user.first_name} {user.last_name}".strip()
+    return full or user.username
+
+
+class ClinicalReportSerializer(serializers.ModelSerializer):
+    appointment_starts_at = serializers.DateTimeField(
+        source="appointment.starts_at", read_only=True
+    )
+    therapist_name = serializers.CharField(
+        source="therapist.display_name", read_only=True
+    )
+    patient_name = serializers.SerializerMethodField()
+    session_type_name = serializers.CharField(
+        source="appointment.session_type.name", read_only=True
+    )
+
+    class Meta:
+        model = ClinicalReport
+        fields = [
+            "id",
+            "appointment",
+            "appointment_starts_at",
+            "session_type_name",
+            "therapist",
+            "therapist_name",
+            "patient",
+            "patient_name",
+            "summary",
+            "assessment",
+            "treatment_plan",
+            "risk_flags",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "appointment_starts_at",
+            "session_type_name",
+            "therapist",
+            "therapist_name",
+            "patient",
+            "patient_name",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_patient_name(self, obj) -> str:
+        return _profile_display_name(obj.patient)
+
+    def get_extra_kwargs(self):
+        kwargs = super().get_extra_kwargs()
+        if self.instance is not None:
+            kwargs["appointment"] = {"read_only": True}
+        return kwargs
+
+
+class FileAccessRequestSerializer(serializers.ModelSerializer):
+    therapist_name = serializers.CharField(
+        source="therapist.display_name", read_only=True
+    )
+    patient_name = serializers.SerializerMethodField()
+    granted_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FileAccessRequest
+        fields = [
+            "id",
+            "therapist",
+            "therapist_name",
+            "patient",
+            "patient_name",
+            "status",
+            "reason",
+            "decision_note",
+            "granted_by",
+            "granted_by_name",
+            "decided_at",
+            "expires_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "therapist",
+            "therapist_name",
+            "patient_name",
+            "status",
+            "decision_note",
+            "granted_by",
+            "granted_by_name",
+            "decided_at",
+            "expires_at",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_patient_name(self, obj) -> str:
+        return _profile_display_name(obj.patient)
+
+    def get_granted_by_name(self, obj) -> str | None:
+        user = obj.granted_by
+        if not user:
+            return None
+        full = f"{user.first_name} {user.last_name}".strip()
+        return full or user.username
+
+
+class MissingReportAppointmentSerializer(serializers.ModelSerializer):
+    patient_name = serializers.SerializerMethodField()
+    therapist_name = serializers.CharField(
+        source="therapist.display_name", read_only=True
+    )
+    session_type_name = serializers.CharField(
+        source="session_type.name", read_only=True
+    )
+
+    class Meta:
+        model = Appointment
+        fields = [
+            "id",
+            "patient",
+            "patient_name",
+            "therapist",
+            "therapist_name",
+            "session_type_name",
+            "starts_at",
+            "ends_at",
+        ]
+
+    def get_patient_name(self, obj) -> str:
+        return _profile_display_name(obj.patient)
+
+
+class ApproveFileAccessSerializer(serializers.Serializer):
+    access_days = serializers.IntegerField(required=False, min_value=1, default=7)
+
+
+class RejectFileAccessSerializer(serializers.Serializer):
+    decision_note = serializers.CharField(
+        required=False, allow_blank=True, default=""
+    )
+
+
 class PsychometricFormSerializer(serializers.ModelSerializer):
     class Meta:
         model = PsychometricForm
@@ -876,6 +1024,39 @@ class BlogPostSerializer(serializers.ModelSerializer):
         return profile.id if profile else None
 
 
+class NewsSlideSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NewsSlide
+        fields = [
+            "id",
+            "title",
+            "body",
+            "image",
+            "link_url",
+            "link_label",
+            "sort_order",
+            "is_published",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+        extra_kwargs = {
+            "image": {"required": False, "allow_null": True},
+        }
+
+    def to_internal_value(self, data):
+        """Keep the current file when JSON resubmits a media URL or empty value."""
+        if hasattr(data, "copy"):
+            data = data.copy()
+        image = data.get("image") if hasattr(data, "get") else None
+        if image is None or isinstance(image, str):
+            try:
+                data.pop("image")
+            except (KeyError, AttributeError, TypeError):
+                pass
+        return super().to_internal_value(data)
+
+
 class SitePageSerializer(serializers.ModelSerializer):
     class Meta:
         model = SitePage
@@ -945,6 +1126,10 @@ class TherapistPatientDetailSerializer(TherapistPatientSummarySerializer):
     recent_appointments = AppointmentSerializer(many=True)
     recent_notes = SessionNoteSerializer(many=True)
     recent_responses = PsychometricResponseSerializer(many=True)
+    clinical_reports = ClinicalReportSerializer(many=True)
+    has_full_file_access = serializers.BooleanField()
+    pending_file_access_request = FileAccessRequestSerializer(allow_null=True)
+    other_therapists_report_count = serializers.IntegerField()
 
 
 class TherapistFinanceAppointmentSerializer(serializers.Serializer):
