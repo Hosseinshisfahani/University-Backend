@@ -10,8 +10,18 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from apps.notifications.models import OtpChallenge
+from apps.notifications.services import OtpError, request_otp, verify_otp
+from apps.notifications.ssmss_client import normalize_phone
+
 from .cookies import delete_jwt_cookies, set_access_cookie, set_refresh_cookie
-from .serializers import RegisterSerializer, UserSerializer
+from .models import User
+from .serializers import (
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
+    RegisterSerializer,
+    UserSerializer,
+)
 
 # The auth endpoints below disable the default cookie authentication class:
 # they must work when the access token is missing or expired, and they
@@ -66,6 +76,70 @@ class RegisterView(APIView):
         set_access_cookie(response, str(refresh.access_token))
         set_refresh_cookie(response, str(refresh))
         return response
+
+
+class RegisterRequestOtpView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=PasswordResetRequestSerializer, responses={200: None})
+    def post(self, request):
+        phone = request.data.get("phone", "")
+        try:
+            request_otp(phone=phone, purpose=OtpChallenge.Purpose.REGISTER)
+        except OtpError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "کد تایید ارسال شد."})
+
+
+class PasswordResetRequestView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=PasswordResetRequestSerializer, responses={200: None})
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phone = normalize_phone(serializer.validated_data["phone"])
+        user = User.objects.filter(phone=phone).first()
+        if user is None:
+            return Response(
+                {"detail": "حسابی با این شماره یافت نشد."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            request_otp(phone=phone, purpose=OtpChallenge.Purpose.PASSWORD_RESET)
+        except OtpError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "کد تایید ارسال شد."})
+
+
+class PasswordResetConfirmView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=PasswordResetConfirmSerializer, responses={200: None})
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phone = serializer.validated_data["phone"]
+        try:
+            verify_otp(
+                phone=phone,
+                purpose=OtpChallenge.Purpose.PASSWORD_RESET,
+                code=serializer.validated_data["otp"],
+            )
+        except OtpError as exc:
+            return Response({"otp": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.filter(phone=phone).first()
+        if user is None:
+            return Response(
+                {"detail": "حسابی با این شماره یافت نشد."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user.set_password(serializer.validated_data["password"])
+        user.save(update_fields=["password"])
+        return Response({"detail": "رمز عبور به‌روز شد."})
 
 
 class RefreshView(TokenRefreshView):

@@ -1,9 +1,18 @@
 from django.conf import settings
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 import json
 
+from apps.notifications.models import OtpChallenge, SmsMessage
+from apps.notifications.services import request_otp
+
 from .models import User
+
+
+def sms_otp(phone: str, purpose: str) -> str:
+    request_otp(phone=phone, purpose=purpose)
+    body = SmsMessage.objects.filter(phone=phone).latest("created_at").body
+    return body.split(":")[1].split()[0].strip()
 
 
 class CookieJWTAuthFlowTests(TestCase):
@@ -82,8 +91,10 @@ class CookieJWTAuthFlowTests(TestCase):
         self.assertEqual(response.status_code, 401)
 
 
+@override_settings(SMS_SANDBOX_MODE=True)
 class RegisterFlowTests(TestCase):
     def test_register_creates_patient_and_sets_cookies(self):
+        otp = sms_otp("09121112233", OtpChallenge.Purpose.REGISTER)
         response = self.client.post(
             reverse("accounts:register"),
             data=json.dumps(
@@ -93,6 +104,7 @@ class RegisterFlowTests(TestCase):
                     "password_confirm": "Pass1234!",
                     "email": "new@example.com",
                     "phone": "09121112233",
+                    "otp": otp,
                 }
             ),
             content_type="application/json",
@@ -105,8 +117,42 @@ class RegisterFlowTests(TestCase):
         self.assertIn(settings.JWT_ACCESS_COOKIE, response.cookies)
 
         user = User.objects.get(username="newpatient")
+        self.assertEqual(user.phone, "09121112233")
+        self.assertEqual(body["user"]["phone"], "09121112233")
         self.assertTrue(hasattr(user, "patient_profile"))
         self.assertEqual(user.patient_profile.phone, "09121112233")
+
+    def test_register_without_otp_fails(self):
+        response = self.client.post(
+            reverse("accounts:register"),
+            data=json.dumps(
+                {
+                    "username": "nootp",
+                    "password": "Pass1234!",
+                    "password_confirm": "Pass1234!",
+                    "phone": "09121112233",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_register_wrong_otp_fails(self):
+        sms_otp("09121112233", OtpChallenge.Purpose.REGISTER)
+        response = self.client.post(
+            reverse("accounts:register"),
+            data=json.dumps(
+                {
+                    "username": "wrongotp",
+                    "password": "Pass1234!",
+                    "password_confirm": "Pass1234!",
+                    "phone": "09121112233",
+                    "otp": "000000",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
 
     def test_register_duplicate_username_fails(self):
         User.objects.create_user(username="taken", password="Pass1234!")
@@ -136,3 +182,58 @@ class RegisterFlowTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+@override_settings(SMS_SANDBOX_MODE=True)
+class PasswordResetFlowTests(TestCase):
+    def test_password_reset_request_and_confirm(self):
+        User.objects.create_user(
+            username="resetme",
+            password="OldPass123!",
+            phone="09124445566",
+        )
+        request = self.client.post(
+            reverse("accounts:password-reset-request"),
+            data=json.dumps({"phone": "09124445566"}),
+            content_type="application/json",
+        )
+        self.assertEqual(request.status_code, 200)
+
+        body = SmsMessage.objects.filter(phone="09124445566").latest("created_at").body
+        otp = body.split(":")[1].split()[0].strip()
+
+        confirm = self.client.post(
+            reverse("accounts:password-reset-confirm"),
+            data=json.dumps(
+                {
+                    "phone": "09124445566",
+                    "otp": otp,
+                    "password": "NewPass123!",
+                    "password_confirm": "NewPass123!",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm.status_code, 200)
+        self.assertNotIn(settings.JWT_ACCESS_COOKIE, confirm.cookies)
+
+        old_login = self.client.post(
+            reverse("accounts:login"),
+            {"username": "resetme", "password": "OldPass123!"},
+        )
+        self.assertEqual(old_login.status_code, 401)
+
+        new_login = self.client.post(
+            reverse("accounts:login"),
+            {"username": "resetme", "password": "NewPass123!"},
+        )
+        self.assertEqual(new_login.status_code, 200)
+
+    def test_password_reset_unknown_phone_fails(self):
+        response = self.client.post(
+            reverse("accounts:password-reset-request"),
+            data=json.dumps({"phone": "09129999999"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "حسابی با این شماره یافت نشد.")

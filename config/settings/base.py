@@ -44,6 +44,7 @@ LOCAL_APPS = [
     "apps.core",
     "apps.accounts",
     "apps.finance",
+    "apps.notifications",
     "apps.institutes.psy_institute",
 ]
 
@@ -219,4 +220,16 @@ SEP_FRONTEND_SUCCESS_URL = env(
 SEP_FRONTEND_FAILURE_URL = env(
     "SEP_FRONTEND_FAILURE_URL",
     default="http://localhost:3000/patient/wallet/payment/failure",
+)
+
+
+# ---------------------------------------------------------------------------
+# SMS (SSMSS REST)
+# ---------------------------------------------------------------------------
+SMS_SANDBOX_MODE = env.bool("SMS_SANDBOX_MODE", default=True)
+SSMSS_API_KEY = env("SSMSS_API_KEY", default="")
+SSMSS_SENDER_NUMBER = env("SSMSS_SENDER_NUMBER", default="")
+SSMSS_BASE_URL = env(
+    "SSMSS_BASE_URL",
+    default="http://ssmss.ir/webservice/rest",
 )

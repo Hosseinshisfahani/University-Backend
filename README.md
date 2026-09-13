@@ -19,6 +19,7 @@ backend/
     core/                      # shared abstract models (TimeStampedModel) — no domain logic
     accounts/                  # custom User model + cookie-based JWT auth
     finance/                   # platform wallet, ledger, payments (SEP), withdrawals (IRR)
+    notifications/             # platform SMS / notifications
     university_services/       # domain: core university operational services
     student_services/          # domain: student affairs modules and portals
     institutes/
@@ -26,7 +27,7 @@ backend/
     lms_platform/              # domain: LMS for courses and workshops
 ```
 
-The four domain directories are namespaces. `core`, `accounts`, and `finance` are foundational. `institutes.psy_institute` is the first fully scaffolded domain app.
+The four domain directories are namespaces. `core`, `accounts`, `finance`, and `notifications` are foundational. `institutes.psy_institute` is the first fully scaffolded domain app.
 
 ## Setup
 

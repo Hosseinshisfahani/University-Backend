@@ -2,6 +2,10 @@ from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 
+from apps.notifications.models import OtpChallenge
+from apps.notifications.services import OtpError, verify_otp
+from apps.notifications.ssmss_client import is_iranian_mobile, normalize_phone
+
 from .models import User
 
 
@@ -16,6 +20,7 @@ class UserSerializer(serializers.ModelSerializer):
             "email",
             "first_name",
             "last_name",
+            "phone",
             "is_staff",
             "date_joined",
             "groups",
@@ -33,17 +38,31 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False, allow_blank=True, default="")
     first_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=150)
     last_name = serializers.CharField(required=False, allow_blank=True, default="", max_length=150)
-    phone = serializers.CharField(required=False, allow_blank=True, default="", max_length=32)
+    phone = serializers.CharField(max_length=32)
+    otp = serializers.CharField(write_only=True, min_length=6, max_length=6)
 
     def validate_username(self, value: str) -> str:
         if User.objects.filter(username__iexact=value).exists():
             raise serializers.ValidationError("این نام کاربری قبلاً ثبت شده است.")
         return value
 
+    def validate_phone(self, value: str) -> str:
+        phone = normalize_phone(value)
+        if not is_iranian_mobile(phone):
+            raise serializers.ValidationError("شماره موبایل معتبر نیست.")
+        if User.objects.filter(phone=phone).exists():
+            raise serializers.ValidationError("این شماره قبلاً ثبت شده است.")
+        return phone
+
     def validate(self, attrs):
         if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError({"password_confirm": "رمز عبور و تکرار آن یکسان نیستند."})
         validate_password(attrs["password"])
+        otp = attrs.pop("otp")
+        try:
+            verify_otp(phone=attrs["phone"], purpose=OtpChallenge.Purpose.REGISTER, code=otp)
+        except OtpError as exc:
+            raise serializers.ValidationError({"otp": str(exc)})
         return attrs
 
     @transaction.atomic
@@ -55,7 +74,28 @@ class RegisterSerializer(serializers.Serializer):
         phone = validated_data.pop("phone", "")
         password = validated_data.pop("password")
         user = User.objects.create_user(password=password, **validated_data)
+        if phone:
+            user.phone = phone
+            user.save(update_fields=["phone"])
         group, _ = Group.objects.get_or_create(name="psy_patient")
         user.groups.add(group)
         PatientProfile.objects.get_or_create(user=user, defaults={"phone": phone})
         return user
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=32)
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=32)
+    otp = serializers.CharField(min_length=6, max_length=6)
+    password = serializers.CharField(write_only=True, min_length=8)
+    password_confirm = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["password_confirm"]:
+            raise serializers.ValidationError({"password_confirm": "رمز عبور و تکرار آن یکسان نیستند."})
+        validate_password(attrs["password"])
+        attrs["phone"] = normalize_phone(attrs["phone"])
+        return attrs

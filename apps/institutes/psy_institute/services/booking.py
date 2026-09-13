@@ -12,6 +12,7 @@ from apps.finance import services as finance_services
 from apps.finance.models import LedgerEntry
 
 from ..models import Appointment, AppointmentSlot, PatientProfile, SessionType, TherapistSessionOffer
+from .notify import notify_appointment
 
 OFFLINE_PAYMENT_REF = "offline"
 
@@ -81,9 +82,9 @@ def confirm_appointment_payment(
     idempotency_key: str,
     allow_offline: bool = False,
 ) -> Appointment:
-    appointment = Appointment.objects.select_for_update().select_related("patient__user", "slot").get(
-        pk=appointment.pk
-    )
+    appointment = Appointment.objects.select_for_update().select_related(
+        "patient__user", "therapist__user", "therapist", "slot"
+    ).get(pk=appointment.pk)
     if appointment.status != Appointment.Status.PENDING_PAYMENT:
         raise BookingError("Appointment is not awaiting payment.")
     if payment_ref == OFFLINE_PAYMENT_REF and not allow_offline:
@@ -117,6 +118,10 @@ def confirm_appointment_payment(
     slot.status = AppointmentSlot.Status.BOOKED
     slot.hold_expires_at = None
     slot.save(update_fields=["status", "hold_expires_at", "updated_at"])
+    appointment = Appointment.objects.select_related(
+        "patient__user", "therapist__user", "therapist"
+    ).get(pk=appointment.pk)
+    notify_appointment(appointment, "confirmed")
     return appointment
 
 
@@ -137,7 +142,7 @@ def cancel_appointment(
     canceled_by: 'patient' | 'therapist' | 'admin'
     """
     appointment = Appointment.objects.select_for_update().select_related(
-        "patient__user", "slot"
+        "patient__user", "therapist__user", "therapist", "slot"
     ).get(pk=appointment.pk)
 
     if appointment.status not in (
@@ -146,6 +151,7 @@ def cancel_appointment(
     ):
         raise BookingError("Appointment cannot be canceled.")
 
+    was_confirmed = appointment.status == Appointment.Status.CONFIRMED
     now = timezone.now()
     wallet_captured = bool(appointment.deposit_ledger_ref)
     if canceled_by == "patient":
@@ -202,6 +208,11 @@ def cancel_appointment(
     slot.status = AppointmentSlot.Status.BLOCKED
     slot.hold_expires_at = None
     slot.save(update_fields=["status", "hold_expires_at", "updated_at"])
+    if was_confirmed:
+        appointment = Appointment.objects.select_related(
+            "patient__user", "therapist__user", "therapist"
+        ).get(pk=appointment.pk)
+        notify_appointment(appointment, "canceled")
     return appointment
 
 
@@ -209,7 +220,7 @@ def cancel_appointment(
 def move_appointment(*, appointment: Appointment, new_slot_id: int) -> Appointment:
     """Admin-only: move a confirmed/pending appointment to a new open slot."""
     appointment = Appointment.objects.select_for_update().select_related(
-        "slot", "session_type"
+        "patient__user", "therapist__user", "therapist", "slot", "session_type"
     ).get(pk=appointment.pk)
     if appointment.status not in (
         Appointment.Status.PENDING_PAYMENT,
@@ -257,6 +268,11 @@ def move_appointment(*, appointment: Appointment, new_slot_id: int) -> Appointme
             "updated_at",
         ]
     )
+    if appointment.status == Appointment.Status.CONFIRMED:
+        appointment = Appointment.objects.select_related(
+            "patient__user", "therapist__user", "therapist"
+        ).get(pk=appointment.pk)
+        notify_appointment(appointment, "moved")
     return appointment
 
 

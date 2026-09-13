@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
@@ -1771,4 +1771,84 @@ class ClinicalRecordsApiTests(TestCase):
         self.assertEqual(len(expired_view["clinical_reports"]), 1)
         row.refresh_from_db()
         self.assertEqual(row.status, FileAccessRequest.Status.EXPIRED)
+
+
+@override_settings(SMS_SANDBOX_MODE=True)
+class AppointmentSmsTests(TestCase):
+    def setUp(self):
+        therapist_user = User.objects.create_user(
+            username="sms_th", password="x", phone="09121112233"
+        )
+        patient_user = User.objects.create_user(
+            username="sms_pt",
+            password="x",
+            phone="09123334455",
+            first_name="Sara",
+        )
+        self.therapist = TherapistProfile.objects.create(
+            user=therapist_user, display_name="Dr. SMS"
+        )
+        self.patient = PatientProfile.objects.create(
+            user=patient_user, phone="09123334455"
+        )
+        session_type = SessionType.objects.create(
+            name="SMS session",
+            slug="sms-session",
+            modality=SessionType.Modality.ONLINE,
+            duration_minutes=45,
+            price=Decimal("100000"),
+        )
+        starts = timezone.now() + timedelta(days=2)
+        slot = AppointmentSlot.objects.create(
+            therapist=self.therapist,
+            session_type=session_type,
+            starts_at=starts,
+            ends_at=starts + timedelta(minutes=45),
+            status=AppointmentSlot.Status.BOOKED,
+        )
+        self.appointment = Appointment.objects.create(
+            slot=slot,
+            patient=self.patient,
+            therapist=self.therapist,
+            session_type=session_type,
+            starts_at=slot.starts_at,
+            ends_at=slot.ends_at,
+            status=Appointment.Status.CONFIRMED,
+            price_snapshot=session_type.price,
+        )
+
+    def _loaded(self):
+        return Appointment.objects.select_related(
+            "patient__user", "therapist__user", "therapist"
+        ).get(pk=self.appointment.pk)
+
+    def test_confirmed_sends_two_sms(self):
+        from apps.institutes.psy_institute.services.notify import notify_appointment
+        from apps.notifications.models import SmsMessage
+
+        notify_appointment(self._loaded(), "confirmed")
+        rows = SmsMessage.objects.filter(purpose=SmsMessage.Purpose.APPOINTMENT)
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(
+            set(rows.values_list("phone", flat=True)),
+            {"09123334455", "09121112233"},
+        )
+
+    def test_empty_phones_do_not_raise(self):
+        from apps.institutes.psy_institute.services.notify import notify_appointment
+        from apps.notifications.models import SmsMessage
+
+        self.patient.user.phone = ""
+        self.patient.user.save(update_fields=["phone"])
+        self.patient.phone = ""
+        self.patient.save(update_fields=["phone"])
+        self.therapist.user.phone = ""
+        self.therapist.user.save(update_fields=["phone"])
+
+        notify_appointment(self._loaded(), "confirmed")
+        rows = SmsMessage.objects.filter(purpose=SmsMessage.Purpose.APPOINTMENT)
+        self.assertEqual(rows.count(), 2)
+        self.assertTrue(
+            all(row.status == SmsMessage.Status.SKIPPED_NO_PHONE for row in rows)
+        )
 

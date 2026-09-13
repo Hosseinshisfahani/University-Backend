@@ -15,6 +15,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 api_v1_patterns = [
     path("auth/", include("apps.accounts.urls")),
     path("finance/", include("apps.finance.urls")),
+    path("notifications/", include("apps.notifications.urls")),
     path("psy/", include("apps.institutes.psy_institute.urls")),
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
     path("docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
