@@ -1,30 +1,18 @@
-ARG BASE_IMAGE=python:3.13-slim
+ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DJANGO_SETTINGS_MODULE=config.settings.prod
 WORKDIR /app
-
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    libpq-dev \
-    gcc \
     && rm -rf /var/lib/apt/lists/*
-
-# Install python dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
-
-# Copy project source
 COPY . .
-
-# Ensure entrypoint script is executable
-RUN chmod +x /app/entrypoint.sh
-
-# Run as non-root user
-RUN mkdir -p /app/media /app/staticfiles \
+RUN chmod +x /app/entrypoint.sh \
+    && mkdir -p /app/media /app/staticfiles \
     && useradd -m -u 1001 django \
     && chown -R django:django /app
 USER django
