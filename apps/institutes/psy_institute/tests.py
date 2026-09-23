@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
@@ -48,6 +48,79 @@ class ProfileSmokeTests(TestCase):
 
         self.assertTrue(hasattr(therapist_user, "therapist_profile"))
         self.assertTrue(hasattr(patient_user, "patient_profile"))
+
+
+class SpecialtyListFieldTests(SimpleTestCase):
+    def test_plain_text_becomes_a_list(self):
+        from apps.institutes.psy_institute.forms import parse_specialties
+
+        self.assertEqual(
+            parse_specialties("مشاوره خانواده\nمشاوره پژوهش"),
+            ["مشاوره خانواده", "مشاوره پژوهش"],
+        )
+        self.assertEqual(
+            parse_specialties("مشاوره خانواده، مشاوره پژوهش"),
+            ["مشاوره خانواده", "مشاوره پژوهش"],
+        )
+
+    def test_bracket_groups_and_json_are_accepted(self):
+        from apps.institutes.psy_institute.forms import parse_specialties
+
+        self.assertEqual(
+            parse_specialties("[مشاوره خانواده][مشاوره پژوهش]"),
+            ["مشاوره خانواده", "مشاوره پژوهش"],
+        )
+        self.assertEqual(
+            parse_specialties('["اضطراب", "خانواده"]'),
+            ["اضطراب", "خانواده"],
+        )
+
+    def test_empty_and_duplicates(self):
+        from apps.institutes.psy_institute.forms import parse_specialties
+
+        self.assertEqual(parse_specialties(""), [])
+        self.assertEqual(parse_specialties("  \n  "), [])
+        self.assertEqual(
+            parse_specialties("خانواده، خانواده\nخانواده"),
+            ["خانواده"],
+        )
+
+
+class TherapistSpecialtyAdminFormTests(TestCase):
+    def test_admin_form_stores_lines_as_json_list(self):
+        from apps.institutes.psy_institute.forms import TherapistProfileAdminForm
+
+        user = User.objects.create_user(username="dr-mosavi", password="x")
+        form = TherapistProfileAdminForm(
+            data={
+                "user": user.pk,
+                "display_name": "خانم دکتر سیده سمیه موسوی",
+                "bio": "",
+                "specialties": "مشاوره خانواده\nمشاوره پژوهش",
+                "is_accepting_patients": "on",
+                "is_active": "on",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        profile = form.save()
+        profile.refresh_from_db()
+        self.assertEqual(profile.specialties, ["مشاوره خانواده", "مشاوره پژوهش"])
+
+    def test_existing_specialties_render_as_lines(self):
+        from apps.institutes.psy_institute.forms import TherapistProfileAdminForm
+
+        user = User.objects.create_user(username="dr-existing", password="x")
+        profile = TherapistProfile.objects.create(
+            user=user,
+            display_name="Dr. Existing",
+            specialties=["اضطراب", "خانواده"],
+        )
+        form = TherapistProfileAdminForm(instance=profile)
+        rendered = str(form["specialties"])
+        self.assertIn("اضطراب", rendered)
+        self.assertIn("خانواده", rendered)
+        self.assertNotIn("JSON", rendered)
+        self.assertNotIn("json", rendered)
 
 
 class TherapistPortalApiTests(TestCase):

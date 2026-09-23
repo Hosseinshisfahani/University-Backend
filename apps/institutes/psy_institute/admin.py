@@ -1,10 +1,12 @@
 from django.contrib import admin
 
 from . import models
+from .forms import TherapistProfileAdminForm
 
 
 @admin.register(models.TherapistProfile)
 class TherapistProfileAdmin(admin.ModelAdmin):
+    form = TherapistProfileAdminForm
     list_display = ("display_name", "user", "is_active", "is_accepting_patients")
     search_fields = ("display_name", "user__username")
 
