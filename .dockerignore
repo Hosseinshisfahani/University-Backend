@@ -11,3 +11,5 @@ __pycache__
 staticfiles
 media
 *.md
+github-actions-deploy
+github-actions-deploy.pub

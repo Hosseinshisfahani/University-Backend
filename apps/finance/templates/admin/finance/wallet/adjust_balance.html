@@ -1,0 +1,67 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static admin_urls %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/css/forms.css' %}">
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url 'admin:finance_wallet_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; <a href="{% url 'admin:finance_wallet_change' wallet.pk %}">{{ wallet }}</a>
+  &rsaquo; Adjust Balance
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>Adjust balance</h1>
+
+<div class="module aligned">
+  <p>
+    User: <strong>{{ wallet.user }}</strong>
+    (id {{ wallet.user_id }})
+  </p>
+  <p>
+    Current cached balance:
+    <strong>{{ wallet.balance }}</strong> Rials
+    ({{ balance_toman }} Toman).
+  </p>
+  <p class="help">
+    Balance is never edited on the Wallet row. This form writes an immutable
+    <code>LedgerEntry</code> with type <code>adjustment</code> through
+    <code>credit_wallet</code> / <code>debit_wallet</code>.
+  </p>
+</div>
+
+<form method="post" novalidate>
+  {% csrf_token %}
+  <fieldset class="module aligned">
+    {% if form.non_field_errors %}
+      <p class="errornote">{{ form.non_field_errors }}</p>
+    {% endif %}
+
+    {% for field in form %}
+      <div class="form-row{% if field.errors %} errors{% endif %}">
+        <div>
+          {{ field.errors }}
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}
+            <div class="help">{{ field.help_text }}</div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </fieldset>
+
+  <div class="submit-row">
+    <input type="submit" value="Apply adjustment" class="default">
+    <a href="{% url 'admin:finance_wallet_change' wallet.pk %}" class="button cancel-link">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

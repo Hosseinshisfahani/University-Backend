@@ -260,3 +260,99 @@ class VandarPaymentFlowTests(TestCase):
         self.assertEqual(payment.status, Payment.Status.FAILED)
         wallet = services.get_or_create_wallet(self.user)
         self.assertEqual(wallet.balance, Decimal("0"))
+
+
+class WalletAdminAdjustBalanceTests(TestCase):
+    def setUp(self):
+        self.staff = User.objects.create_superuser(
+            username="finance-admin",
+            email="finance-admin@example.com",
+            password="s3cret",
+        )
+        self.user = User.objects.create_user(username="wallet-owner", password="x")
+        self.wallet = services.get_or_create_wallet(self.user)
+        self.client = self.client_class()
+        self.client.force_login(self.staff)
+
+    def _adjust_url(self):
+        return reverse("admin:finance_wallet_adjust", args=[self.wallet.pk])
+
+    def test_credit_writes_adjustment_ledger_and_updates_balance(self):
+        response = self.client.post(
+            self._adjust_url(),
+            {
+                "action": "credit",
+                "amount": "1500",
+                "description": "Reception cash deposit",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, Decimal("15000"))
+        entry = LedgerEntry.objects.get(wallet=self.wallet)
+        self.assertEqual(entry.direction, LedgerEntry.Direction.CREDIT)
+        self.assertEqual(entry.entry_type, LedgerEntry.EntryType.ADJUSTMENT)
+        self.assertEqual(entry.amount, Decimal("15000"))
+        self.assertEqual(entry.reference, f"admin.manual:{self.staff.id}")
+        self.assertTrue(entry.idempotency_key.startswith(f"admin-adj-{self.wallet.id}-"))
+        self.assertEqual(entry.description, "Reception cash deposit")
+        self.assertEqual(entry.created_by_id, self.staff.id)
+
+    def test_debit_requires_sufficient_balance(self):
+        services.credit_wallet(
+            user=self.user,
+            amount=Decimal("10000"),
+            entry_type=LedgerEntry.EntryType.DEPOSIT,
+            idempotency_key="seed-1",
+        )
+        response = self.client.post(
+            self._adjust_url(),
+            {
+                "action": "debit",
+                "amount": "2000",
+                "description": "Too large",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, Decimal("10000"))
+        self.assertEqual(
+            LedgerEntry.objects.filter(
+                entry_type=LedgerEntry.EntryType.ADJUSTMENT
+            ).count(),
+            0,
+        )
+
+    def test_debit_succeeds_with_sufficient_balance(self):
+        services.credit_wallet(
+            user=self.user,
+            amount=Decimal("50000"),
+            entry_type=LedgerEntry.EntryType.DEPOSIT,
+            idempotency_key="seed-2",
+        )
+        response = self.client.post(
+            self._adjust_url(),
+            {
+                "action": "debit",
+                "amount": "1200",
+                "description": "Correction",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.wallet.refresh_from_db()
+        self.assertEqual(self.wallet.balance, Decimal("38000"))
+        entry = LedgerEntry.objects.get(entry_type=LedgerEntry.EntryType.ADJUSTMENT)
+        self.assertEqual(entry.direction, LedgerEntry.Direction.DEBIT)
+        self.assertEqual(entry.amount, Decimal("12000"))
+
+    def test_balance_field_stays_readonly_on_change_form(self):
+        response = self.client.get(
+            reverse("admin:finance_wallet_change", args=[self.wallet.pk])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Adjust Balance")
+        # Django renders readonly balance as plain text, not an editable input.
+        self.assertNotContains(
+            response,
+            'name="balance"',
+        )
