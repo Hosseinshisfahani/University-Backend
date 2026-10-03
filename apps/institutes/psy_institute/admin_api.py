@@ -334,9 +334,9 @@ class AdminFinanceSummaryView(APIView):
             created_at__date__gte=date_from,
             created_at__date__lte=date_to,
         )
-        sep = Payment.objects.filter(
+        gateway = Payment.objects.filter(
             status=Payment.Status.SUCCEEDED,
-            provider=Payment.Provider.SEP,
+            provider__in=[Payment.Provider.SEP, Payment.Provider.VANDAR],
             created_at__date__gte=date_from,
             created_at__date__lte=date_to,
         )
@@ -346,15 +346,15 @@ class AdminFinanceSummaryView(APIView):
         refund = ledger.filter(entry_type=LedgerEntry.EntryType.REFUND).aggregate(
             total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
         )
-        sep_agg = sep.aggregate(
+        gateway_agg = gateway.aggregate(
             total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
         )
         return Response(
             {
                 "from": str(date_from),
                 "to": str(date_to),
-                "sep_succeeded_total": str(sep_agg["total"]),
-                "sep_succeeded_count": sep_agg["n"],
+                "gateway_succeeded_total": str(gateway_agg["total"]),
+                "gateway_succeeded_count": gateway_agg["n"],
                 "appointment_capture_total": str(capture["total"]),
                 "appointment_capture_count": capture["n"],
                 "refund_total": str(refund["total"]),
@@ -419,7 +419,9 @@ class AdminFinancePaymentsView(APIView):
         date_to = request.query_params.get("to")
         if status_param:
             qs = qs.filter(status=status_param)
-        if provider:
+        if provider == "gateway":
+            qs = qs.filter(provider__in=[Payment.Provider.SEP, Payment.Provider.VANDAR])
+        elif provider:
             qs = qs.filter(provider=provider)
         if date_from:
             qs = qs.filter(created_at__date__gte=date_from)

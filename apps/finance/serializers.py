@@ -54,7 +54,7 @@ class CreatePaymentSerializer(serializers.Serializer):
     purpose = serializers.CharField(max_length=64, required=False, allow_blank=True)
     provider = serializers.ChoiceField(
         choices=Payment.Provider.choices,
-        default=Payment.Provider.SEP,
+        default=Payment.Provider.VANDAR,
     )
     metadata = serializers.JSONField(required=False)
 
@@ -97,6 +97,6 @@ class RejectWithdrawalSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
 
-class SepInitiateSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=12, decimal_places=0, min_value=1)
+class VandarInitiateSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=0, min_value=100)
     purpose = serializers.CharField(max_length=64, required=False, allow_blank=True)

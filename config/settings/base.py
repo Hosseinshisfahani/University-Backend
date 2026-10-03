@@ -193,33 +193,30 @@ CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 FINANCE_CURRENCY = "IRR"
 
 # ---------------------------------------------------------------------------
-# SEP (Saman Electronic Payment)
+# Vandar IPG
 # ---------------------------------------------------------------------------
-SEP_SANDBOX_MODE = env.bool("SEP_SANDBOX_MODE", default=True)
-SEP_TERMINAL_ID = env("SEP_TERMINAL_ID", default="")
-SEP_CALLBACK_URL = env(
-    "SEP_CALLBACK_URL",
-    default="http://127.0.0.1:8000/api/v1/finance/sep/callback/",
+# Callback and browser return URLs come only from the environment so staging,
+# QA, and tunnels can set their own hosts without a code change.
+VANDAR_SANDBOX_MODE = env.bool("VANDAR_SANDBOX_MODE", default=True)
+VANDAR_API_KEY = env("VANDAR_API_KEY", default="")
+VANDAR_CALLBACK_URL = env("VANDAR_CALLBACK_URL", default="")
+VANDAR_FRONTEND_SUCCESS_URL = env("VANDAR_FRONTEND_SUCCESS_URL", default="")
+VANDAR_FRONTEND_FAILURE_URL = env("VANDAR_FRONTEND_FAILURE_URL", default="")
+VANDAR_SEND_URL = env(
+    "VANDAR_SEND_URL",
+    default="https://ipg.vandar.io/api/v4/send",
 )
-SEP_TOKEN_URL = env(
-    "SEP_TOKEN_URL",
-    default="https://sep.shaparak.ir/onlinepg/onlinepg",
+VANDAR_REDIRECT_BASE_URL = env(
+    "VANDAR_REDIRECT_BASE_URL",
+    default="https://ipg.vandar.io/v4",
 )
-SEP_REDIRECT_BASE_URL = env(
-    "SEP_REDIRECT_BASE_URL",
-    default="https://sep.shaparak.ir/OnlinePG/SendToken",
+VANDAR_VERIFY_URL = env(
+    "VANDAR_VERIFY_URL",
+    default="https://ipg.vandar.io/api/v4/verify",
 )
-SEP_VERIFY_URL = env(
-    "SEP_VERIFY_URL",
-    default="https://sep.shaparak.ir/verifyTxnRandomSessionkey/ipg/VerifyTransaction",
-)
-SEP_FRONTEND_SUCCESS_URL = env(
-    "SEP_FRONTEND_SUCCESS_URL",
-    default="http://localhost:3000/patient/wallet/payment/success",
-)
-SEP_FRONTEND_FAILURE_URL = env(
-    "SEP_FRONTEND_FAILURE_URL",
-    default="http://localhost:3000/patient/wallet/payment/failure",
+VANDAR_TRANSACTION_URL = env(
+    "VANDAR_TRANSACTION_URL",
+    default="https://ipg.vandar.io/api/v4/transaction",
 )
 
 

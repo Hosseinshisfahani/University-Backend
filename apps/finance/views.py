@@ -15,7 +15,7 @@ from .serializers import (
     LedgerEntrySerializer,
     PaymentSerializer,
     RejectWithdrawalSerializer,
-    SepInitiateSerializer,
+    VandarInitiateSerializer,
     WalletSerializer,
     WithdrawalSerializer,
 )
@@ -76,7 +76,7 @@ class PaymentViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.Retr
             user=request.user,
             amount=ser.validated_data["amount"],
             purpose=ser.validated_data.get("purpose", ""),
-            provider=ser.validated_data.get("provider", Payment.Provider.SEP),
+            provider=ser.validated_data.get("provider", Payment.Provider.VANDAR),
             metadata=ser.validated_data.get("metadata"),
         )
         return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
@@ -165,16 +165,16 @@ class WithdrawalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.R
         return Response(WithdrawalSerializer(withdrawal).data)
 
 
-class SepInitiateView(APIView):
-    """Authenticated: create pending SEP payment and return bank redirect URL."""
+class VandarInitiateView(APIView):
+    """Authenticated: create a pending Vandar payment and return the redirect URL."""
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        ser = SepInitiateSerializer(data=request.data)
+        ser = VandarInitiateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
-            result = services.initiate_sep_payment(
+            result = services.initiate_vandar_payment(
                 user=request.user,
                 amount=ser.validated_data["amount"],
                 purpose=ser.validated_data.get("purpose", ""),
@@ -193,11 +193,8 @@ class SepInitiateView(APIView):
         )
 
 
-class SepCallbackView(APIView):
-    """
-    Public bank return URL. CSRF-exempt via empty authentication_classes.
-    Redirects the browser to the frontend success/failure pages.
-    """
+class VandarCallbackView(APIView):
+    """Public Vandar return URL. Redirects the browser to the frontend."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -215,16 +212,16 @@ class SepCallbackView(APIView):
         return self._handle(data)
 
     def _handle(self, data: dict):
-        success_base = settings.SEP_FRONTEND_SUCCESS_URL
-        failure_base = settings.SEP_FRONTEND_FAILURE_URL
+        success_base = settings.VANDAR_FRONTEND_SUCCESS_URL
+        failure_base = settings.VANDAR_FRONTEND_FAILURE_URL
         try:
-            payment = services.handle_sep_callback(data=data)
+            payment = services.handle_vandar_callback(data=data)
         except services.FinanceError:
             return redirect(failure_base)
 
         if payment.status == Payment.Status.SUCCEEDED:
-            sep = "&" if "?" in success_base else "?"
-            return redirect(f"{success_base}{sep}payment_id={payment.pk}")
+            joiner = "&" if "?" in success_base else "?"
+            return redirect(f"{success_base}{joiner}payment_id={payment.pk}")
 
-        sep = "&" if "?" in failure_base else "?"
-        return redirect(f"{failure_base}{sep}payment_id={payment.pk}")
+        joiner = "&" if "?" in failure_base else "?"
+        return redirect(f"{failure_base}{joiner}payment_id={payment.pk}")

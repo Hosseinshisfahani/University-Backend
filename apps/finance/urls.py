@@ -12,7 +12,7 @@ router.register("withdrawals", views.WithdrawalViewSet, basename="withdrawal")
 urlpatterns = [
     path("wallet/", views.WalletView.as_view(), name="wallet"),
     path("wallet/ledger/", views.LedgerListView.as_view(), name="ledger"),
-    path("sep/initiate/", views.SepInitiateView.as_view(), name="sep-initiate"),
-    path("sep/callback/", views.SepCallbackView.as_view(), name="sep-callback"),
+    path("vandar/initiate/", views.VandarInitiateView.as_view(), name="vandar-initiate"),
+    path("vandar/callback/", views.VandarCallbackView.as_view(), name="vandar-callback"),
     *router.urls,
 ]

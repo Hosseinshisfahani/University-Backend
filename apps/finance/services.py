@@ -122,7 +122,7 @@ def create_payment(
     user,
     amount: Decimal,
     purpose: str = "",
-    provider: str = Payment.Provider.SEP,
+    provider: str = Payment.Provider.VANDAR,
     provider_ref: str = "",
     metadata: dict | None = None,
 ) -> Payment:
@@ -151,7 +151,10 @@ def confirm_payment(
     payment = Payment.objects.select_for_update().get(pk=payment.pk)
     if payment.status == Payment.Status.SUCCEEDED:
         return payment
-    if payment.status in (Payment.Status.FAILED, Payment.Status.CANCELED):
+    if payment.status not in (
+        Payment.Status.PENDING,
+        Payment.Status.INDETERMINATE,
+    ):
         raise FinanceError(f"Cannot confirm payment in status {payment.status}.")
 
     key = idempotency_key or f"payment-confirm:{payment.pk}"
@@ -189,61 +192,193 @@ def mark_payment_failed(
     return payment
 
 
-def initiate_sep_payment(
+@transaction.atomic
+def mark_payment_indeterminate(
     *,
-    user,
-    amount: Decimal,
-    purpose: str = "",
-) -> dict:
+    payment: Payment,
+    metadata: dict | None = None,
+) -> Payment:
+    payment = Payment.objects.select_for_update().get(pk=payment.pk)
+    if payment.status in (
+        Payment.Status.SUCCEEDED,
+        Payment.Status.FAILED,
+        Payment.Status.CANCELED,
+    ):
+        return payment
+    payment.status = Payment.Status.INDETERMINATE
+    if metadata:
+        payment.metadata = {**(payment.metadata or {}), **metadata}
+    payment.save(update_fields=["status", "metadata", "updated_at"])
+    return payment
+
+
+def initiate_vandar_payment(*, user, amount: Decimal, purpose: str = "") -> dict:
     """
-    Create a pending SEP Payment and obtain a redirect URL (sandbox or live).
+    Create a pending Vandar payment from a toman amount.
     Returns {payment, redirect_url, provider_ref, sandbox}.
     """
-    from django.conf import settings
+    from . import vandar_gateway
 
-    from . import sep_gateway
+    if amount != amount.to_integral_value() or amount <= 0:
+        raise FinanceError("Toman amount must be a positive whole number.")
 
-    res_num = sep_gateway.generate_res_num()
+    amount_rial = Decimal(int(amount) * 10)
+    if amount_rial < 1000:
+        raise FinanceError("Amount must be at least 1000 rials (100 toman).")
+
     payment = create_payment(
         user=user,
-        amount=amount,
+        amount=amount_rial,
         purpose=purpose,
-        provider=Payment.Provider.SEP,
-        provider_ref=res_num,
-        metadata={"sep": {"initiated": True}},
+        provider=Payment.Provider.VANDAR,
+        metadata={"vandar": {"initiated": True, "amount_toman": int(amount)}},
     )
-
     try:
-        token_result = sep_gateway.request_token(
-            amount=amount,
-            res_num=res_num,
-            redirect_url=getattr(settings, "SEP_CALLBACK_URL", ""),
+        token_result = vandar_gateway.request_token(
+            amount=amount_rial,
+            factor_number=str(payment.pk),
         )
-    except sep_gateway.SepGatewayError as exc:
+    except vandar_gateway.VandarGatewayError as exc:
         mark_payment_failed(
             payment=payment,
             metadata={
-                "sep_token_error": str(exc),
-                "sep_token_error_payload": exc.payload,
+                "vandar_token_error": str(exc),
+                "vandar_token_error_payload": exc.payload,
             },
         )
         raise FinanceError(str(exc)) from exc
 
+    payment.provider_ref = token_result.token
     payment.metadata = {
         **(payment.metadata or {}),
-        "sep_token": token_result.token,
-        "sep_token_request": token_result.request_payload,
-        "sep_token_response": token_result.response_payload,
-        "sep_sandbox": token_result.sandbox,
+        "vandar_token": token_result.token,
+        "vandar_token_request": token_result.request_payload,
+        "vandar_token_response": token_result.response_payload,
+        "vandar_sandbox": token_result.sandbox,
     }
-    payment.save(update_fields=["metadata", "updated_at"])
-
+    payment.save(update_fields=["provider_ref", "metadata", "updated_at"])
     return {
         "payment": payment,
         "redirect_url": token_result.redirect_url,
-        "provider_ref": res_num,
+        "provider_ref": token_result.token,
         "sandbox": token_result.sandbox,
     }
+
+
+def _record_vandar_result(meta: dict, result, prefix: str) -> dict:
+    meta[f"{prefix}_request"] = result.request_payload
+    meta[f"{prefix}_response"] = result.response_payload
+    meta[f"{prefix}_message"] = result.message
+    if result.trans_id:
+        meta["vandar_trans_id"] = result.trans_id
+    if result.card_number:
+        meta["vandar_card_number"] = result.card_number
+    return meta
+
+
+def _confirm_vandar(payment: Payment, meta: dict) -> Payment:
+    return confirm_payment(
+        payment=payment,
+        metadata=meta,
+        idempotency_key=f"vandar-confirm:{payment.pk}",
+    )
+
+
+@transaction.atomic
+def handle_vandar_callback(*, data: dict) -> Payment:
+    """
+    Process the Vandar return. The row lock serializes duplicate callbacks
+    so the wallet is credited once.
+    """
+    from . import vandar_gateway
+
+    token = _callback_field(data, "token")
+    payment_status = _callback_field(data, "payment_status").upper()
+    if not token:
+        raise FinanceError("Vandar callback missing token.")
+
+    try:
+        payment = (
+            Payment.objects.select_for_update()
+            .filter(provider=Payment.Provider.VANDAR, provider_ref=token)
+            .get()
+        )
+    except Payment.DoesNotExist as exc:
+        raise FinanceError("Unknown Vandar payment (token).") from exc
+
+    meta = {**(payment.metadata or {}), "vandar_callback": dict(data)}
+
+    if payment.status == Payment.Status.SUCCEEDED:
+        payment.metadata = meta
+        payment.save(update_fields=["metadata", "updated_at"])
+        return payment
+
+    if payment.status in (Payment.Status.FAILED, Payment.Status.CANCELED):
+        return payment
+
+    if payment_status == "FAILED":
+        return mark_payment_failed(payment=payment, metadata=meta)
+
+    if payment_status != "OK":
+        return mark_payment_indeterminate(payment=payment, metadata=meta)
+
+    try:
+        verified = vandar_gateway.verify_transaction(
+            token=token,
+            expected_amount=payment.amount,
+        )
+    except vandar_gateway.VandarGatewayError as exc:
+        meta["vandar_verify_error"] = str(exc)
+        meta["vandar_verify_error_payload"] = exc.payload
+        if not exc.indeterminate:
+            return mark_payment_failed(payment=payment, metadata=meta)
+        verified = None
+
+    if verified is not None:
+        meta = _record_vandar_result(meta, verified, "vandar_verify")
+        if verified.success:
+            return _confirm_vandar(payment, meta)
+        if not verified.indeterminate and not verified.confirm_required:
+            return mark_payment_failed(payment=payment, metadata=meta)
+
+    try:
+        inquiry = vandar_gateway.inquire_transaction(
+            token=token,
+            expected_amount=payment.amount,
+        )
+    except vandar_gateway.VandarGatewayError as exc:
+        meta["vandar_inquiry_error"] = str(exc)
+        meta["vandar_inquiry_error_payload"] = exc.payload
+        if exc.indeterminate:
+            return mark_payment_indeterminate(payment=payment, metadata=meta)
+        return mark_payment_failed(payment=payment, metadata=meta)
+
+    meta = _record_vandar_result(meta, inquiry, "vandar_inquiry")
+    if inquiry.success:
+        return _confirm_vandar(payment, meta)
+    if inquiry.indeterminate:
+        return mark_payment_indeterminate(payment=payment, metadata=meta)
+    if not inquiry.confirm_required:
+        return mark_payment_failed(payment=payment, metadata=meta)
+
+    try:
+        retried = vandar_gateway.verify_transaction(
+            token=token,
+            expected_amount=payment.amount,
+        )
+    except vandar_gateway.VandarGatewayError as exc:
+        meta["vandar_verify_retry_error"] = str(exc)
+        meta["vandar_verify_retry_error_payload"] = exc.payload
+        if exc.indeterminate:
+            return mark_payment_indeterminate(payment=payment, metadata=meta)
+        return mark_payment_failed(payment=payment, metadata=meta)
+
+    meta = _record_vandar_result(meta, retried, "vandar_verify_retry")
+    if retried.success:
+        return _confirm_vandar(payment, meta)
+    if retried.indeterminate or retried.confirm_required:
+        return mark_payment_indeterminate(payment=payment, metadata=meta)
+    return mark_payment_failed(payment=payment, metadata=meta)
 
 
 def _callback_field(data: dict, *names: str) -> str:
@@ -258,85 +393,6 @@ def _callback_field(data: dict, *names: str) -> str:
         if value is not None and str(value).strip() != "":
             return str(value).strip()
     return ""
-
-
-@transaction.atomic
-def handle_sep_callback(*, data: dict) -> Payment:
-    """
-    Process SEP bank return payload. Idempotent: repeated success callbacks
-    do not double-credit the wallet.
-    """
-    from . import sep_gateway
-
-    res_num = _callback_field(data, "ResNum", "resNum", "RESNUM")
-    ref_num = _callback_field(data, "RefNum", "refNum", "REFNUM")
-    state = _callback_field(data, "State", "state", "Status", "status")
-
-    if not res_num:
-        raise FinanceError("SEP callback missing ResNum.")
-
-    try:
-        payment = (
-            Payment.objects.select_for_update()
-            .filter(provider=Payment.Provider.SEP, provider_ref=res_num)
-            .get()
-        )
-    except Payment.DoesNotExist as exc:
-        raise FinanceError("Unknown SEP payment (ResNum).") from exc
-
-    meta = {**(payment.metadata or {}), "sep_callback": dict(data)}
-
-    if payment.status == Payment.Status.SUCCEEDED:
-        payment.metadata = meta
-        payment.save(update_fields=["metadata", "updated_at"])
-        return payment
-
-    # Common SEP cancel/fail indicators
-    state_upper = state.upper()
-    fail_states = {
-        "CANCELED",
-        "CANCELLED",
-        "FAILED",
-        "FAIL",
-        "ERROR",
-        "NOK",
-        "CANCELED_BY_USER",
-        "CANCEL",
-    }
-    if state_upper in fail_states or state_upper.startswith("CANCEL"):
-        return mark_payment_failed(payment=payment, metadata=meta)
-
-    try:
-        verify = sep_gateway.verify_transaction(
-            ref_num=ref_num or f"sandbox-ref-{res_num}",
-            expected_amount=payment.amount,
-        )
-    except sep_gateway.SepGatewayError as exc:
-        return mark_payment_failed(
-            payment=payment,
-            metadata={
-                **meta,
-                "sep_verify_error": str(exc),
-                "sep_verify_error_payload": exc.payload,
-            },
-        )
-
-    meta["sep_verify_request"] = verify.request_payload
-    meta["sep_verify_response"] = verify.response_payload
-
-    if not verify.success:
-        return mark_payment_failed(
-            payment=payment,
-            metadata={**meta, "sep_verify_message": verify.message},
-        )
-
-    # Keep merchant ResNum as provider_ref; store bank RefNum in metadata.
-    meta["sep_ref_num"] = verify.ref_num
-    return confirm_payment(
-        payment=payment,
-        metadata=meta,
-        idempotency_key=f"sep-confirm:{payment.pk}",
-    )
 
 
 @transaction.atomic

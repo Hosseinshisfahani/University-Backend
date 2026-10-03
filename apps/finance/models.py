@@ -106,6 +106,7 @@ class LedgerEntry(models.Model):
 class Payment(TimeStampedModel):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
+        INDETERMINATE = "indeterminate", "Indeterminate"
         SUCCEEDED = "succeeded", "Succeeded"
         FAILED = "failed", "Failed"
         CANCELED = "canceled", "Canceled"
@@ -113,6 +114,7 @@ class Payment(TimeStampedModel):
     class Provider(models.TextChoices):
         MANUAL = "manual", "Manual / reception"
         SEP = "sep", "SEP (Saman Electronic Payment)"
+        VANDAR = "vandar", "Vandar"
         GATEWAY = "gateway", "Generic gateway"
 
     user = models.ForeignKey(
@@ -134,7 +136,7 @@ class Payment(TimeStampedModel):
     provider = models.CharField(
         max_length=16,
         choices=Provider.choices,
-        default=Provider.SEP,
+        default=Provider.VANDAR,
         verbose_name="درگاه",
     )
     provider_ref = models.CharField(

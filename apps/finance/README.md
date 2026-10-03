@@ -1,8 +1,10 @@
 # Finance (`apps.finance`)
 
-Platform-wide wallet, append-only ledger, payments (SEP-ready), and withdrawals.
+Platform-wide wallet, append-only ledger, payments (Vandar IPG), and withdrawals.
 
-- Currency: **IRR (Rials)**, `decimal_places=0`. Toman display is frontend-only.
+- Currency stored on the wallet and ledger: **IRR (Rials)**, `decimal_places=0`.
+- Wallet top-up requests are **toman**. `initiate_vandar_payment` is the only `* 10` conversion. It stores and charges rials.
+- Balance display in toman stays on the frontend.
 - Domain apps must call `finance.services` — never mutate `Wallet.balance` directly.
 - No imports from `psy_institute` (or other domains); use opaque `reference` / `ticket_reference` strings.
 
@@ -14,21 +16,21 @@ Platform-wide wallet, append-only ledger, payments (SEP-ready), and withdrawals.
 | `GET /wallet/ledger/` | Recent ledger |
 | `POST/GET /payments/` | Create / list (manual or generic) |
 | `POST /payments/{id}/confirm/` | Admin confirm → credit |
-| `POST /sep/initiate/` | Authenticated SEP top-up → `{redirect_url, provider_ref, payment}` |
-| `GET\|POST /sep/callback/` | Public bank return → verifies, credits wallet, redirects to frontend |
+| `POST /vandar/initiate/` | Authenticated top-up. `amount` is toman. Returns `{redirect_url, provider_ref, payment}` |
+| `GET\|POST /vandar/callback/` | Public Vandar return. Verifies, credits once, redirects to the frontend |
 | `POST/GET /withdrawals/` | Cash-out hold on wallet |
 | `POST /withdrawals/{id}/approve\|paid\|reject/` | Admin processing |
 
-## SEP (Saman)
+## Vandar IPG
 
-Defaults to **sandbox** (`SEP_SANDBOX_MODE=true`): no outbound bank HTTP; mock token + verify.
+Sandbox is the default (`VANDAR_SANDBOX_MODE=true`): no outbound HTTP.
 
 | Env | Purpose |
 |---|---|
-| `SEP_SANDBOX_MODE` | `true` (default) / `false` for production |
-| `SEP_TERMINAL_ID` | Required when sandbox is off |
-| `SEP_CALLBACK_URL` | Bank return URL (this API's `/sep/callback/`) |
-| `SEP_FRONTEND_SUCCESS_URL` / `SEP_FRONTEND_FAILURE_URL` | Browser redirects after callback |
-| `SEP_TOKEN_URL` / `SEP_REDIRECT_BASE_URL` / `SEP_VERIFY_URL` | Production SEP endpoints |
+| `VANDAR_SANDBOX_MODE` | `true` (default) / `false` for production |
+| `VANDAR_API_KEY` | IPG key from the Vandar dashboard. Required when sandbox is off |
+| `VANDAR_CALLBACK_URL` | Public return URL for this environment. Required when sandbox is off. No default host |
+| `VANDAR_FRONTEND_SUCCESS_URL` / `VANDAR_FRONTEND_FAILURE_URL` | Browser redirects after callback. No default host |
+| `VANDAR_SEND_URL` / `VANDAR_REDIRECT_BASE_URL` / `VANDAR_VERIFY_URL` / `VANDAR_TRANSACTION_URL` | Vandar IPG endpoints |
 
-Raw SEP request/response payloads are stored on `Payment.metadata` for audit.
+`Payment.provider` value `sep` remains valid for historical payments.
