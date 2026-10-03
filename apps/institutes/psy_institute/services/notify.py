@@ -1,7 +1,10 @@
+import jdatetime
 from django.utils import timezone
 
 from apps.notifications.models import SmsMessage
 from apps.notifications.services import send_sms
+
+_PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 
 def _phone(user) -> str:
@@ -9,7 +12,15 @@ def _phone(user) -> str:
 
 
 def _when(dt) -> str:
-    return timezone.localtime(dt).strftime("%Y-%m-%d %H:%M")
+    """Tehran-local Jalali label, e.g. دوشنبه ۱۳ مهر ۱۴۰۵، ساعت ۱۱:۰۰"""
+    local = jdatetime.datetime.fromgregorian(
+        datetime=timezone.localtime(dt), locale="fa_IR"
+    )
+    label = (
+        f"{local.strftime('%A')} {local.day} {local.strftime('%B')} {local.year}، "
+        f"ساعت {local.strftime('%H:%M')}"
+    )
+    return label.translate(_PERSIAN_DIGITS)
 
 
 def _patient_name(appointment) -> str:

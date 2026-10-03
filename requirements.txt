@@ -8,3 +8,4 @@ psycopg[binary]==3.3.4
 Pillow==11.3.0
 gunicorn==26.0.0
 whitenoise==6.12.0
+jdatetime==6.1.0

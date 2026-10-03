@@ -1907,6 +1907,15 @@ class AppointmentSmsTests(TestCase):
             {"09123334455", "09121112233"},
         )
 
+    def test_sms_date_is_jalali_with_persian_digits(self):
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+
+        from apps.institutes.psy_institute.services.notify import _when
+
+        starts = dt.datetime(2026, 10, 5, 11, 0, tzinfo=ZoneInfo("Asia/Tehran"))
+        self.assertEqual(_when(starts), "دوشنبه ۱۳ مهر ۱۴۰۵، ساعت ۱۱:۰۰")
+
     def test_empty_phones_do_not_raise(self):
         from apps.institutes.psy_institute.services.notify import notify_appointment
         from apps.notifications.models import SmsMessage
