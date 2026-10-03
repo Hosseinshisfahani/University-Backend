@@ -36,6 +36,7 @@ from .serializers import (
     LeaveReviewSerializer,
     PsychometricResponseSerializer,
     TherapistProfileSerializer,
+    TherapistSessionOfferSerializer,
 )
 
 
@@ -311,15 +312,7 @@ class AdminTherapistDetailView(APIView):
                 "email": therapist.user.email,
                 "availability_count": availability_count,
                 "open_slots_14d": open_slots,
-                "offers": [
-                    {
-                        "id": o.id,
-                        "session_type_id": o.session_type_id,
-                        "session_type_name": o.session_type.name,
-                        "is_active": o.is_active,
-                    }
-                    for o in offers
-                ],
+                "offers": TherapistSessionOfferSerializer(offers, many=True).data,
                 "recent_appointments": AppointmentSerializer(recent, many=True).data,
             }
         )
