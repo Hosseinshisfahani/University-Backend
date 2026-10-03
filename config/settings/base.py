@@ -54,6 +54,8 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
+    # Outermost so Cache-Control is applied after the rest of the stack.
+    "apps.core.middleware.DisableApiResponseCachingMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -183,6 +185,17 @@ JWT_REFRESH_COOKIE_PATH = "/api/v1/auth/"
 
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 CORS_ALLOW_CREDENTIALS = True
+# API client sends these so the edge CDN will not replay a stale GET.
+CORS_ALLOW_HEADERS = (
+    "accept",
+    "authorization",
+    "content-type",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+    "cache-control",
+    "pragma",
+)
 
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
