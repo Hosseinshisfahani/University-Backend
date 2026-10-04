@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 
 from . import models
 from .forms import TherapistProfileAdminForm
@@ -9,6 +10,33 @@ class TherapistProfileAdmin(admin.ModelAdmin):
     form = TherapistProfileAdminForm
     list_display = ("display_name", "user", "is_active", "is_accepting_patients")
     search_fields = ("display_name", "user__username")
+    readonly_fields = ("profile_image_preview",)
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": (
+                    "user",
+                    "display_name",
+                    "profile_image",
+                    "profile_image_preview",
+                    "bio",
+                    "specialties",
+                    "is_accepting_patients",
+                    "is_active",
+                )
+            },
+        ),
+    )
+
+    @admin.display(description="پیش‌نمایش تصویر")
+    def profile_image_preview(self, obj):
+        if not obj or not obj.profile_image:
+            return "—"
+        return format_html(
+            '<img src="{}" alt="" style="height:96px;width:96px;object-fit:cover;border-radius:999px;" />',
+            obj.profile_image.url,
+        )
 
 
 @admin.register(models.PatientProfile)

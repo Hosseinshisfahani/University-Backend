@@ -92,6 +92,7 @@ class TherapistProfileSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "display_name",
+            "profile_image",
             "bio",
             "specialties",
             "is_accepting_patients",
@@ -100,6 +101,7 @@ class TherapistProfileSerializer(serializers.ModelSerializer):
             "rating_avg",
             "rating_count",
         ]
+        read_only_fields = ["profile_image"]
 
     def get_rating_avg(self, obj) -> float | None:
         avg = getattr(obj, "rating_avg", None)

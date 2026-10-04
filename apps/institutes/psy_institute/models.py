@@ -34,6 +34,12 @@ class TherapistProfile(TimeStampedModel):
         verbose_name="کاربر",
     )
     display_name = models.CharField(max_length=120, verbose_name="نام نمایشی")
+    profile_image = models.ImageField(
+        upload_to="psy/therapists/",
+        blank=True,
+        max_length=500,
+        verbose_name="تصویر پروفایل",
+    )
     bio = models.TextField(blank=True, verbose_name="معرفی")
     specialties = models.JSONField(default=list, blank=True, verbose_name="تخصص‌ها")
     is_accepting_patients = models.BooleanField(

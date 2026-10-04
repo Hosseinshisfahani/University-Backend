@@ -122,6 +122,43 @@ class TherapistSpecialtyAdminFormTests(TestCase):
         self.assertNotIn("JSON", rendered)
         self.assertNotIn("json", rendered)
 
+    def test_admin_form_saves_profile_image(self):
+        import io
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image
+        from rest_framework.test import APIRequestFactory
+
+        from apps.institutes.psy_institute.forms import TherapistProfileAdminForm
+        from apps.institutes.psy_institute.serializers import TherapistProfileSerializer
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buffer, format="PNG")
+        upload = SimpleUploadedFile(
+            "face.png", buffer.getvalue(), content_type="image/png"
+        )
+        user = User.objects.create_user(username="dr-photo", password="x")
+        form = TherapistProfileAdminForm(
+            data={
+                "user": user.pk,
+                "display_name": "دکتر تصویر",
+                "bio": "",
+                "specialties": "اضطراب",
+                "is_accepting_patients": "on",
+                "is_active": "on",
+            },
+            files={"profile_image": upload},
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        profile = form.save()
+        self.assertTrue(profile.profile_image.name.startswith("psy/therapists/"))
+
+        request = APIRequestFactory().get("/api/v1/psy/therapists/")
+        payload = TherapistProfileSerializer(
+            profile, context={"request": request}
+        ).data
+        self.assertIn("/media/psy/therapists/", payload["profile_image"])
+
 
 class TherapistPortalApiTests(TestCase):
     def setUp(self):
