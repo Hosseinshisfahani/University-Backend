@@ -26,10 +26,13 @@ from apps.institutes.psy_institute.models import (
     AppointmentSlot,
     BlogPost,
     ClinicalReport,
+    Coupon,
     FileAccessRequest,
     LeaveRequest,
     NewsSlide,
     PatientProfile,
+    Product,
+    ProductCategory,
     PsychometricForm,
     PsychometricResponse,
     SessionNote,
@@ -453,6 +456,7 @@ class Command(BaseCommand):
             form, therapist, patients
         )
         workshops_info = self._seed_workshops(therapist, patients, media_paths)
+        shop_info = self._seed_shop()
         blog_info = self._seed_blog(therapist.user, admin_user, media_paths)
         news_info = self._seed_news(media_paths)
         tickets_info = self._seed_tickets(admin_user, patients)
@@ -487,6 +491,7 @@ class Command(BaseCommand):
             f"  psychometric form=sample-phq  responses_created≈{responses_created}"
         )
         self.stdout.write(f"  workshops={workshops_info}")
+        self.stdout.write(f"  shop={shop_info}")
         self.stdout.write(f"  blog={blog_info}")
         self.stdout.write(f"  news={news_info}")
         self.stdout.write(f"  tickets={tickets_info}")
@@ -1293,6 +1298,61 @@ class Command(BaseCommand):
             f"paid={paid.slug} free={free.slug} "
             f"lms_sessions={paid.sessions.count()} enrollments={paid.enrollments.count() + free.enrollments.count()}"
         )
+
+    def _seed_shop(self) -> str:
+        books, _ = ProductCategory.objects.update_or_create(
+            slug="books",
+            defaults={
+                "name": "کتاب",
+                "description": "کتاب‌های روان‌شناسی و خودیاری",
+                "sort_order": 1,
+                "is_active": True,
+            },
+        )
+        audio, _ = ProductCategory.objects.update_or_create(
+            slug="audio",
+            defaults={
+                "name": "فایل صوتی",
+                "description": "تمرین‌ها و فایل‌های قابل دانلود",
+                "sort_order": 2,
+                "is_active": True,
+            },
+        )
+        products = [
+            ("anxiety-book", "کتاب کار اضطراب", books, "physical", "4500000", "راهنمای عملی مدیریت اضطراب"),
+            ("sleep-book", "خواب آرام", books, "physical", "3200000", "عادت‌های خواب برای بزرگسالان"),
+            ("child-book", "فرزندپروری آگاهانه", books, "physical", "3800000", "مهارت‌های ارتباط با کودک"),
+            ("calm-audio", "آرام‌سازی عضلانی", audio, "digital", "900000", "فایل صوتی ۲۰ دقیقه‌ای"),
+            ("breath-audio", "تمرین تنفس", audio, "digital", "700000", "سه تمرین تنفس دیافراگمی"),
+            ("focus-pack", "بسته تمرکز", audio, "digital", "1500000", "مجموعه تمرین توجه"),
+        ]
+        for slug, title, category, kind, price, description in products:
+            Product.objects.update_or_create(
+                slug=slug,
+                defaults={
+                    "title": title,
+                    "category": category,
+                    "kind": kind,
+                    "description": description,
+                    "body_md": description,
+                    "price": Decimal(price),
+                    "is_published": True,
+                    "is_available": True,
+                },
+            )
+        Coupon.objects.update_or_create(
+            code="WELCOME10",
+            defaults={
+                "kind": Coupon.Kind.PERCENT,
+                "value": Decimal("10"),
+                "max_discount": Decimal("500000"),
+                "min_order_total": Decimal("1000000"),
+                "max_uses": 100,
+                "max_uses_per_user": 1,
+                "is_active": True,
+            },
+        )
+        return "2 categories, 6 products, coupon WELCOME10"
 
     def _seed_blog(self, therapist_user, admin_user, media_paths: dict[str, str]) -> str:
         now = timezone.now()

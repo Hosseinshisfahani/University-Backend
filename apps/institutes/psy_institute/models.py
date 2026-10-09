@@ -1,7 +1,7 @@
 """Psychology institute domain models.
 
 Owns clinic people, schedule inventory, appointments, psychometrics,
-workshops, CMS, and support tickets.
+workshops, the clinic shop, CMS, and support tickets.
 
 Finance is integrated with opaque reference strings (``payment_ref``,
 ``deposit_ledger_ref``, ``refund_ledger_ref``, ``withdrawal_ref``).
@@ -1111,3 +1111,327 @@ class TicketMessage(TimeStampedModel):
         ordering = ["created_at"]
         verbose_name = "پیام تیکت"
         verbose_name_plural = "پیام های تیکت"
+
+
+# ===========================================================================
+# Shop
+# ===========================================================================
+
+
+class ProductCategory(TimeStampedModel):
+    name = models.CharField(max_length=120, verbose_name="نام")
+    slug = models.SlugField(unique=True, verbose_name="نامک")
+    description = models.TextField(blank=True, verbose_name="توضیحات")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="ترتیب")
+    is_active = models.BooleanField(default=True, verbose_name="فعال")
+
+    class Meta:
+        ordering = ["sort_order", "name"]
+        verbose_name = "دسته‌بندی فروشگاه"
+        verbose_name_plural = "دسته‌بندی‌های فروشگاه"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Product(TimeStampedModel):
+    class Kind(models.TextChoices):
+        PHYSICAL = "physical", "Physical"
+        DIGITAL = "digital", "Digital"
+
+    title = models.CharField(max_length=200, verbose_name="عنوان")
+    slug = models.SlugField(unique=True, verbose_name="نامک")
+    category = models.ForeignKey(
+        ProductCategory,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="products",
+        verbose_name="دسته‌بندی",
+    )
+    kind = models.CharField(
+        max_length=16,
+        choices=Kind.choices,
+        default=Kind.PHYSICAL,
+        verbose_name="نوع",
+    )
+    description = models.TextField(blank=True, verbose_name="خلاصه")
+    body_md = models.TextField(blank=True, verbose_name="توضیحات")
+    price = models.DecimalField(
+        max_digits=12, decimal_places=0, verbose_name="قیمت (ریال)"
+    )
+    compare_at_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=0,
+        null=True,
+        blank=True,
+        verbose_name="قیمت قبل از تخفیف (ریال)",
+    )
+    image = models.ImageField(
+        upload_to="psy/shop/products/",
+        blank=True,
+        max_length=500,
+        verbose_name="تصویر",
+    )
+    digital_file = models.FileField(
+        upload_to="psy/shop/files/",
+        blank=True,
+        max_length=500,
+        verbose_name="فایل دیجیتال",
+    )
+    is_published = models.BooleanField(default=False, verbose_name="منتشر شده")
+    is_available = models.BooleanField(default=True, verbose_name="قابل خرید")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="ترتیب")
+
+    class Meta:
+        ordering = ["sort_order", "title"]
+        verbose_name = "محصول"
+        verbose_name_plural = "محصولات"
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class Coupon(TimeStampedModel):
+    class Kind(models.TextChoices):
+        PERCENT = "percent", "Percent"
+        FIXED = "fixed", "Fixed amount"
+
+    code = models.CharField(max_length=40, unique=True, verbose_name="کد")
+    kind = models.CharField(
+        max_length=16, choices=Kind.choices, verbose_name="نوع تخفیف"
+    )
+    value = models.DecimalField(
+        max_digits=12, decimal_places=0, verbose_name="مقدار"
+    )
+    max_discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=0,
+        null=True,
+        blank=True,
+        verbose_name="سقف تخفیف (ریال)",
+    )
+    min_order_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=0,
+        default=0,
+        verbose_name="حداقل مبلغ سفارش (ریال)",
+    )
+    starts_at = models.DateTimeField(null=True, blank=True, verbose_name="شروع")
+    ends_at = models.DateTimeField(null=True, blank=True, verbose_name="پایان")
+    max_uses = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="سقف استفاده کل"
+    )
+    max_uses_per_user = models.PositiveIntegerField(
+        default=1, verbose_name="سقف استفاده هر مراجع"
+    )
+    used_count = models.PositiveIntegerField(default=0, verbose_name="تعداد استفاده")
+    is_active = models.BooleanField(default=True, verbose_name="فعال")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "کد تخفیف"
+        verbose_name_plural = "کدهای تخفیف"
+
+    def __str__(self) -> str:
+        return self.code
+
+
+class Cart(TimeStampedModel):
+    patient = models.OneToOneField(
+        PatientProfile,
+        on_delete=models.CASCADE,
+        related_name="shop_cart",
+        verbose_name="مراجع",
+    )
+    coupon = models.ForeignKey(
+        Coupon,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="carts",
+        verbose_name="کد تخفیف",
+    )
+
+    class Meta:
+        verbose_name = "سبد خرید"
+        verbose_name_plural = "سبدهای خرید"
+
+    def __str__(self) -> str:
+        return f"Cart<{self.patient_id}>"
+
+
+class CartItem(TimeStampedModel):
+    cart = models.ForeignKey(
+        Cart,
+        on_delete=models.CASCADE,
+        related_name="items",
+        verbose_name="سبد",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="cart_items",
+        verbose_name="محصول",
+    )
+    quantity = models.PositiveIntegerField(default=1, verbose_name="تعداد")
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cart", "product"], name="psy_cart_item_unique_product"
+            )
+        ]
+        verbose_name = "آیتم سبد"
+        verbose_name_plural = "آیتم‌های سبد"
+
+    def __str__(self) -> str:
+        return f"{self.product_id} x{self.quantity}"
+
+
+class Order(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING_PAYMENT = "pending_payment", "Pending payment"
+        PAID = "paid", "Paid"
+        PROCESSING = "processing", "Processing"
+        SHIPPED = "shipped", "Shipped"
+        DELIVERED = "delivered", "Delivered"
+        CANCELED = "canceled", "Canceled"
+        REFUNDED = "refunded", "Refunded"
+
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.PROTECT,
+        related_name="shop_orders",
+        verbose_name="مراجع",
+    )
+    number = models.CharField(max_length=20, unique=True, verbose_name="شماره سفارش")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING_PAYMENT,
+        db_index=True,
+        verbose_name="وضعیت",
+    )
+    requires_shipping = models.BooleanField(default=False, verbose_name="نیاز به ارسال")
+    shipping_full_name = models.CharField(
+        max_length=120, blank=True, verbose_name="نام گیرنده"
+    )
+    shipping_phone = models.CharField(max_length=32, blank=True, verbose_name="تلفن")
+    shipping_province = models.CharField(max_length=64, blank=True, verbose_name="استان")
+    shipping_city = models.CharField(max_length=64, blank=True, verbose_name="شهر")
+    shipping_address = models.TextField(blank=True, verbose_name="نشانی")
+    shipping_postal_code = models.CharField(
+        max_length=20, blank=True, verbose_name="کد پستی"
+    )
+    subtotal = models.DecimalField(
+        max_digits=12, decimal_places=0, default=0, verbose_name="جمع جزء (ریال)"
+    )
+    discount_total = models.DecimalField(
+        max_digits=12, decimal_places=0, default=0, verbose_name="تخفیف (ریال)"
+    )
+    shipping_fee = models.DecimalField(
+        max_digits=12, decimal_places=0, default=0, verbose_name="هزینه ارسال (ریال)"
+    )
+    total = models.DecimalField(
+        max_digits=12, decimal_places=0, default=0, verbose_name="مبلغ قابل پرداخت (ریال)"
+    )
+    coupon = models.ForeignKey(
+        Coupon,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders",
+        verbose_name="کد تخفیف",
+    )
+    coupon_code = models.CharField(max_length=40, blank=True, verbose_name="کد تخفیف")
+    payment_ref = models.CharField(max_length=64, blank=True, verbose_name="مرجع پرداخت")
+    deposit_ledger_ref = models.CharField(
+        max_length=64, blank=True, verbose_name="سند برداشت"
+    )
+    refund_ledger_ref = models.CharField(
+        max_length=64, blank=True, verbose_name="سند بازگشت"
+    )
+    hold_expires_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="انقضای مهلت پرداخت"
+    )
+    gateway_payment_id = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="شناسه پرداخت درگاه"
+    )
+    paid_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان پرداخت")
+    shipped_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان ارسال")
+    tracking_code = models.CharField(
+        max_length=64, blank=True, verbose_name="کد رهگیری"
+    )
+    canceled_at = models.DateTimeField(null=True, blank=True, verbose_name="زمان لغو")
+    cancellation_reason = models.TextField(blank=True, verbose_name="دلیل لغو")
+    admin_note = models.TextField(blank=True, verbose_name="یادداشت مدیر")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "سفارش"
+        verbose_name_plural = "سفارش‌ها"
+
+    def __str__(self) -> str:
+        return self.number
+
+
+class OrderItem(TimeStampedModel):
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="items",
+        verbose_name="سفارش",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name="order_items",
+        verbose_name="محصول",
+    )
+    title = models.CharField(max_length=200, verbose_name="عنوان")
+    kind = models.CharField(max_length=16, verbose_name="نوع")
+    unit_price = models.DecimalField(
+        max_digits=12, decimal_places=0, verbose_name="قیمت واحد (ریال)"
+    )
+    quantity = models.PositiveIntegerField(verbose_name="تعداد")
+    line_total = models.DecimalField(
+        max_digits=12, decimal_places=0, verbose_name="جمع ردیف (ریال)"
+    )
+
+    class Meta:
+        ordering = ["id"]
+        verbose_name = "قلم سفارش"
+        verbose_name_plural = "اقلام سفارش"
+
+    def __str__(self) -> str:
+        return f"{self.title} x{self.quantity}"
+
+
+class CouponRedemption(TimeStampedModel):
+    coupon = models.ForeignKey(
+        Coupon,
+        on_delete=models.PROTECT,
+        related_name="redemptions",
+        verbose_name="کد تخفیف",
+    )
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="coupon_redemption",
+        verbose_name="سفارش",
+    )
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.PROTECT,
+        related_name="coupon_redemptions",
+        verbose_name="مراجع",
+    )
+
+    class Meta:
+        verbose_name = "مصرف کد تخفیف"
+        verbose_name_plural = "مصرف‌های کد تخفیف"
+
+    def __str__(self) -> str:
+        return f"{self.coupon_id} → {self.order_id}"

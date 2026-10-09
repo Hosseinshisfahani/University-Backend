@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from django.core.files.base import ContentFile
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -1970,4 +1971,280 @@ class AppointmentSmsTests(TestCase):
         self.assertTrue(
             all(row.status == SmsMessage.Status.SKIPPED_NO_PHONE for row in rows)
         )
+
+
+class ShopFlowTests(TestCase):
+    def setUp(self):
+        from apps.finance import services as finance_services
+        from apps.finance.models import LedgerEntry
+        from apps.institutes.psy_institute.models import Product, ProductCategory
+
+        for name in ("psy_admin", "psy_therapist", "psy_patient"):
+            Group.objects.get_or_create(name=name)
+        self.admin = User.objects.create_user(username="shop_admin", password="x")
+        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        self.patient_user = User.objects.create_user(
+            username="shop_pt", password="x", first_name="نسترن"
+        )
+        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        self.patient = PatientProfile.objects.create(
+            user=self.patient_user, phone="09120002222"
+        )
+        self.books = ProductCategory.objects.create(
+            name="کتاب", slug="books", is_active=True
+        )
+        self.book = Product.objects.create(
+            title="کتاب اضطراب",
+            slug="anxiety-book",
+            category=self.books,
+            kind=Product.Kind.PHYSICAL,
+            description="راهنما",
+            price=Decimal("100000"),
+            is_published=True,
+            is_available=True,
+        )
+        self.audio = Product.objects.create(
+            title="فایل آرام‌سازی",
+            slug="calm-audio",
+            category=self.books,
+            kind=Product.Kind.DIGITAL,
+            description="صوتی",
+            price=Decimal("80000"),
+            is_published=True,
+        )
+        self.audio.digital_file.save("calm.txt", ContentFile(b"relax"), save=True)
+        self.hidden = Product.objects.create(
+            title="پنهان",
+            slug="hidden-item",
+            kind=Product.Kind.PHYSICAL,
+            price=Decimal("1000"),
+            is_published=False,
+        )
+        finance_services.credit_wallet(
+            user=self.patient_user,
+            amount=Decimal("500000"),
+            entry_type=LedgerEntry.EntryType.DEPOSIT,
+            idempotency_key="shop-test-deposit",
+        )
+        self.client = APIClient()
+
+    def _add(self, slug, quantity=1):
+        return self.client.post(
+            reverse("psy_institute:shop-cart-items"),
+            {"slug": slug, "quantity": quantity},
+            format="json",
+        )
+
+    def _checkout(self, **shipping):
+        payload = {
+            "full_name": "نسترن رضایی",
+            "phone": "09120002222",
+            "province": "تهران",
+            "city": "تهران",
+            "address": "خیابان آزمایش",
+            "postal_code": "1234567890",
+        }
+        payload.update(shipping)
+        return self.client.post(
+            reverse("psy_institute:shop-order-list"), payload, format="json"
+        )
+
+    def _pay(self, order_id):
+        return self.client.post(
+            reverse("psy_institute:shop-order-pay", kwargs={"pk": order_id}),
+            {"idempotency_key": f"order-pay:{order_id}"},
+            format="json",
+        )
+
+    def test_catalog_hides_unpublished_products(self):
+        listed = self.client.get(reverse("psy_institute:shop-product-list"))
+        self.assertEqual(listed.status_code, 200)
+        slugs = {row["slug"] for row in listed.json()["results"]}
+        self.assertIn("anxiety-book", slugs)
+        self.assertNotIn("hidden-item", slugs)
+
+        self.client.force_authenticate(self.admin)
+        admin_listed = self.client.get(reverse("psy_institute:shop-product-list"))
+        admin_slugs = {row["slug"] for row in admin_listed.json()["results"]}
+        self.assertIn("hidden-item", admin_slugs)
+
+    def test_wallet_checkout_and_patient_cancel_refunds(self):
+        from apps.finance import services as finance_services
+
+        self.client.force_authenticate(self.patient_user)
+        added = self._add("anxiety-book", 2)
+        self.assertEqual(added.status_code, 201)
+        order = self._checkout()
+        self.assertEqual(order.status_code, 201, order.content)
+        body = order.json()
+        self.assertEqual(body["status"], "pending_payment")
+        self.assertEqual(body["total"], "200000")
+        paid = self._pay(body["id"])
+        self.assertEqual(paid.status_code, 200, paid.content)
+        self.assertEqual(paid.json()["status"], "paid")
+        self.assertEqual(
+            finance_services.get_or_create_wallet(self.patient_user).balance,
+            Decimal("300000"),
+        )
+        canceled = self.client.post(
+            reverse("psy_institute:shop-order-cancel", kwargs={"pk": body["id"]}),
+            {"reason": "انصراف"},
+            format="json",
+        )
+        self.assertEqual(canceled.status_code, 200, canceled.content)
+        self.assertEqual(canceled.json()["status"], "refunded")
+        self.assertEqual(
+            finance_services.get_or_create_wallet(self.patient_user).balance,
+            Decimal("500000"),
+        )
+
+    def test_insufficient_funds(self):
+        from apps.finance.models import Wallet
+
+        Wallet.objects.filter(user=self.patient_user).update(balance=Decimal("1000"))
+        self.client.force_authenticate(self.patient_user)
+        self._add("anxiety-book")
+        order = self._checkout()
+        paid = self._pay(order.json()["id"])
+        self.assertEqual(paid.status_code, 400)
+        self.assertEqual(paid.json()["code"], "insufficient_funds")
+
+    def test_coupon_rules(self):
+        from apps.institutes.psy_institute.models import Coupon
+
+        expired = Coupon.objects.create(
+            code="OLD",
+            kind=Coupon.Kind.PERCENT,
+            value=Decimal("10"),
+            ends_at=timezone.now() - timedelta(days=1),
+        )
+        minimum = Coupon.objects.create(
+            code="BIG",
+            kind=Coupon.Kind.FIXED,
+            value=Decimal("1000"),
+            min_order_total=Decimal("999999999"),
+        )
+        once = Coupon.objects.create(
+            code="ONCE",
+            kind=Coupon.Kind.PERCENT,
+            value=Decimal("10"),
+            max_uses_per_user=1,
+        )
+        self.client.force_authenticate(self.patient_user)
+        self._add("calm-audio")
+        expired_resp = self.client.post(
+            reverse("psy_institute:shop-cart-coupon"),
+            {"code": expired.code},
+            format="json",
+        )
+        self.assertEqual(expired_resp.status_code, 400)
+        self.assertEqual(expired_resp.json()["code"], "coupon_expired")
+        minimum_resp = self.client.post(
+            reverse("psy_institute:shop-cart-coupon"),
+            {"code": minimum.code},
+            format="json",
+        )
+        self.assertEqual(minimum_resp.json()["code"], "coupon_min_total")
+
+        applied = self.client.post(
+            reverse("psy_institute:shop-cart-coupon"),
+            {"code": "once"},
+            format="json",
+        )
+        self.assertEqual(applied.status_code, 200, applied.content)
+        self.assertEqual(applied.json()["discount_total"], "8000")
+        order = self._checkout()
+        self.assertEqual(order.json()["total"], "72000")
+        paid = self._pay(order.json()["id"])
+        self.assertEqual(paid.status_code, 200, paid.content)
+        once.refresh_from_db()
+        self.assertEqual(once.used_count, 1)
+
+        self._add("calm-audio")
+        again = self.client.post(
+            reverse("psy_institute:shop-cart-coupon"),
+            {"code": "ONCE"},
+            format="json",
+        )
+        self.assertEqual(again.status_code, 400)
+        self.assertEqual(again.json()["code"], "coupon_user_limit")
+
+    def test_digital_download_is_gated(self):
+        self.client.force_authenticate(self.patient_user)
+        self._add("calm-audio")
+        order = self._checkout()
+        blocked = self.client.get(
+            reverse("psy_institute:shop-product-download", kwargs={"slug": "calm-audio"})
+        )
+        self.assertEqual(blocked.status_code, 403)
+        self._pay(order.json()["id"])
+        allowed = self.client.get(
+            reverse("psy_institute:shop-product-download", kwargs={"slug": "calm-audio"})
+        )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertIn(b"relax", b"".join(allowed.streaming_content))
+
+    def test_gateway_deposit_marks_order_paid(self):
+        from apps.finance import services as finance_services
+        from apps.finance.models import Wallet
+
+        Wallet.objects.filter(user=self.patient_user).update(balance=Decimal("0"))
+        self.client.force_authenticate(self.patient_user)
+        self._add("calm-audio")
+        order = self._checkout()
+        order_id = order.json()["id"]
+        payment = finance_services.create_payment(
+            user=self.patient_user,
+            amount=Decimal("80000"),
+            purpose=f"psy.order:{order_id}",
+        )
+        finance_services.confirm_payment(payment=payment)
+        detail = self.client.get(
+            reverse("psy_institute:shop-order-detail", kwargs={"pk": order_id})
+        )
+        self.assertEqual(detail.json()["status"], "paid")
+        self.assertEqual(
+            finance_services.get_or_create_wallet(self.patient_user).balance,
+            Decimal("0"),
+        )
+
+    def test_admin_ships_physical_and_fulfills_digital(self):
+        from apps.institutes.psy_institute.models import Product
+
+        self.client.force_authenticate(self.patient_user)
+        self._add("anxiety-book")
+        physical = self._pay(self._checkout().json()["id"]).json()
+        self._add("calm-audio")
+        digital = self._pay(self._checkout().json()["id"]).json()
+
+        self.client.force_authenticate(self.admin)
+        missing_tracking = self.client.patch(
+            reverse("psy_institute:admin-shop-order", kwargs={"pk": physical["id"]}),
+            {"status": "processing"},
+            format="json",
+        )
+        self.assertEqual(missing_tracking.status_code, 200)
+        shipped = self.client.patch(
+            reverse("psy_institute:admin-shop-order", kwargs={"pk": physical["id"]}),
+            {"status": "shipped"},
+            format="json",
+        )
+        self.assertEqual(shipped.status_code, 400)
+        self.assertEqual(shipped.json()["code"], "tracking_required")
+        shipped = self.client.patch(
+            reverse("psy_institute:admin-shop-order", kwargs={"pk": physical["id"]}),
+            {"status": "shipped", "tracking_code": "TRK-1"},
+            format="json",
+        )
+        self.assertEqual(shipped.status_code, 200, shipped.content)
+        self.assertEqual(shipped.json()["status"], "shipped")
+
+        delivered = self.client.patch(
+            reverse("psy_institute:admin-shop-order", kwargs={"pk": digital["id"]}),
+            {"status": "delivered"},
+            format="json",
+        )
+        self.assertEqual(delivered.status_code, 200, delivered.content)
+        self.assertEqual(delivered.json()["status"], "delivered")
+        self.assertEqual(Product.objects.get(slug="calm-audio").kind, "digital")
 

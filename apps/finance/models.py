@@ -52,6 +52,7 @@ class LedgerEntry(models.Model):
         REFUND = "refund", "Refund"
         FORFEIT = "forfeit", "Forfeit"
         WORKSHOP_PURCHASE = "workshop_purchase", "Workshop purchase"
+        SHOP_PURCHASE = "shop_purchase", "Shop purchase"
         WITHDRAWAL = "withdrawal", "Withdrawal"
         WITHDRAWAL_REVERSAL = "withdrawal_reversal", "Withdrawal reversal"
         ADJUSTMENT = "adjustment", "Adjustment"

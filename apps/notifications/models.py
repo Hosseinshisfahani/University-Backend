@@ -12,6 +12,7 @@ class SmsMessage(TimeStampedModel):
         OTP_REGISTER = "otp_register", "OTP ثبت‌نام"
         OTP_PASSWORD_RESET = "otp_password_reset", "OTP بازیابی رمز"
         APPOINTMENT = "appointment", "نوبت"
+        SHOP = "shop", "فروشگاه"
         ADMIN_MANUAL = "admin_manual", "ارسال دستی ادمین"
 
     class Status(models.TextChoices):

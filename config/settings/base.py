@@ -205,6 +205,9 @@ CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 # Amounts are IRR (Rials) with 0 decimal places. Toman UI conversion is frontend-only.
 FINANCE_CURRENCY = "IRR"
 
+# Flat shipping fee (IRR) added to psy shop orders that contain a physical item.
+PSY_SHOP_SHIPPING_FEE = env.int("PSY_SHOP_SHIPPING_FEE", default=0)
+
 # ---------------------------------------------------------------------------
 # Vandar IPG
 # ---------------------------------------------------------------------------
@@ -219,9 +222,11 @@ VANDAR_SEND_URL = env(
     "VANDAR_SEND_URL",
     default="https://ipg.vandar.io/api/v4/send",
 )
+# Browser payment page. /v4/{token} is a JSON API ({"status":true,"ipg_gateway":"saman"})
+# and must not be used as the redirect target.
 VANDAR_REDIRECT_BASE_URL = env(
     "VANDAR_REDIRECT_BASE_URL",
-    default="https://ipg.vandar.io/v4",
+    default="https://ipg.vandar.io/v3",
 )
 VANDAR_VERIFY_URL = env(
     "VANDAR_VERIFY_URL",

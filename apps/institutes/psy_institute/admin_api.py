@@ -10,6 +10,7 @@ from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,6 +22,8 @@ from .models import (
     Appointment,
     AppointmentSlot,
     ClinicalReport,
+    Order,
+    OrderItem,
     PatientProfile,
     PsychometricResponse,
     TherapistAvailability,
@@ -29,6 +32,7 @@ from .models import (
     TherapistSessionOffer,
 )
 from .permissions import IsPsyAdmin
+from .shop_api import ShopOrderSerializer
 from .serializers import (
     AdminTherapistReviewSerializer,
     AppointmentSerializer,
@@ -339,6 +343,9 @@ class AdminFinanceSummaryView(APIView):
         refund = ledger.filter(entry_type=LedgerEntry.EntryType.REFUND).aggregate(
             total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
         )
+        shop = ledger.filter(entry_type=LedgerEntry.EntryType.SHOP_PURCHASE).aggregate(
+            total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
+        )
         gateway_agg = gateway.aggregate(
             total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
         )
@@ -352,6 +359,8 @@ class AdminFinanceSummaryView(APIView):
                 "appointment_capture_count": capture["n"],
                 "refund_total": str(refund["total"]),
                 "refund_count": refund["n"],
+                "shop_purchase_total": str(shop["total"]),
+                "shop_purchase_count": shop["n"],
                 "net_appointment_revenue": str(capture["total"] - refund["total"]),
             }
         )
@@ -550,3 +559,150 @@ class AdminReviewRejectView(APIView):
         except services.ReviewError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response(AdminTherapistReviewSerializer(review).data)
+
+
+class AdminShopOrderUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=Order.Status.choices, required=False)
+    tracking_code = serializers.CharField(required=False, allow_blank=True)
+    admin_note = serializers.CharField(required=False, allow_blank=True)
+
+
+def _admin_orders():
+    return Order.objects.select_related("patient__user").prefetch_related(
+        "items__product"
+    )
+
+
+class AdminShopOrderListView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def get(self, request):
+        qs = _admin_orders().order_by("-created_at")
+        status = request.query_params.get("status")
+        query = (request.query_params.get("q") or "").strip()
+        if status:
+            qs = qs.filter(status=status)
+        if query:
+            qs = qs.filter(
+                Q(number__icontains=query)
+                | Q(patient__user__username__icontains=query)
+                | Q(patient__user__first_name__icontains=query)
+                | Q(patient__user__last_name__icontains=query)
+                | Q(shipping_full_name__icontains=query)
+            )
+        page, page_size, total, items = _paginate(qs, request)
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "results": ShopOrderSerializer(
+                    items, many=True, context={"request": request}
+                ).data,
+            }
+        )
+
+
+class AdminShopOrderDetailView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def get(self, request, pk: int):
+        order = get_object_or_404(_admin_orders(), pk=pk)
+        return Response(ShopOrderSerializer(order, context={"request": request}).data)
+
+    def patch(self, request, pk: int):
+        order = get_object_or_404(Order, pk=pk)
+        ser = AdminShopOrderUpdateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        try:
+            order = services.admin_update_order(
+                order=order,
+                status=data.get("status"),
+                tracking_code=data.get("tracking_code"),
+                admin_note=data.get("admin_note"),
+            )
+        except services.ShopError as exc:
+            return Response(
+                {"code": exc.code, "detail": str(exc), **exc.extra},
+                status=400,
+            )
+        order = get_object_or_404(_admin_orders(), pk=order.pk)
+        return Response(ShopOrderSerializer(order, context={"request": request}).data)
+
+
+class AdminShopOrderRefundView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def post(self, request, pk: int):
+        order = get_object_or_404(Order, pk=pk)
+        reason = ""
+        if isinstance(request.data, dict):
+            reason = request.data.get("reason") or ""
+        try:
+            order = services.cancel_order(
+                order=order, canceled_by="admin", reason=reason
+            )
+        except services.ShopError as exc:
+            return Response(
+                {"code": exc.code, "detail": str(exc), **exc.extra},
+                status=400,
+            )
+        order = get_object_or_404(_admin_orders(), pk=order.pk)
+        return Response(ShopOrderSerializer(order, context={"request": request}).data)
+
+
+class AdminShopStatsView(APIView):
+    permission_classes = [IsAuthenticated, IsPsyAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        paid = Order.objects.filter(status__in=services.PAID_STATUSES)
+
+        def revenue_since(since):
+            return paid.filter(paid_at__gte=since).aggregate(
+                total=Coalesce(Sum("total"), Decimal("0")),
+                n=Count("id"),
+            )
+
+        by_status = {
+            row["status"]: row["n"]
+            for row in Order.objects.values("status").annotate(n=Count("id"))
+        }
+        top = (
+            OrderItem.objects.filter(order__status__in=services.PAID_STATUSES)
+            .values("title")
+            .annotate(
+                quantity=Coalesce(Sum("quantity"), 0),
+                revenue=Coalesce(Sum("line_total"), Decimal("0")),
+            )
+            .order_by("-revenue")[:8]
+        )
+        recent = _admin_orders().order_by("-created_at")[:8]
+        all_time = paid.aggregate(
+            total=Coalesce(Sum("total"), Decimal("0")), n=Count("id")
+        )
+        week = revenue_since(now - timedelta(days=7))
+        month = revenue_since(now - timedelta(days=30))
+        return Response(
+            {
+                "revenue_total": str(all_time["total"]),
+                "orders_paid_count": all_time["n"],
+                "revenue_7d": str(week["total"]),
+                "orders_7d": week["n"],
+                "revenue_30d": str(month["total"]),
+                "orders_30d": month["n"],
+                "orders_by_status": by_status,
+                "top_products": [
+                    {
+                        "title": row["title"],
+                        "quantity": row["quantity"],
+                        "revenue": str(row["revenue"]),
+                    }
+                    for row in top
+                ],
+                "recent_orders": ShopOrderSerializer(
+                    recent, many=True, context={"request": request}
+                ).data,
+            }
+        )

@@ -173,6 +173,10 @@ def confirm_payment(
         payment.metadata = {**(payment.metadata or {}), **metadata}
     payment.ledger_entry = entry
     payment.save()
+    # Listeners (e.g. shop order finalization) must swallow their own errors.
+    from .signals import payment_succeeded
+
+    payment_succeeded.send(sender=Payment, payment=payment)
     return payment
 
 

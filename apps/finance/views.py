@@ -220,8 +220,14 @@ class VandarCallbackView(APIView):
             return redirect(failure_base)
 
         if payment.status == Payment.Status.SUCCEEDED:
-            joiner = "&" if "?" in success_base else "?"
-            return redirect(f"{success_base}{joiner}payment_id={payment.pk}")
+            return redirect(_frontend_return(success_base, payment))
 
-        joiner = "&" if "?" in failure_base else "?"
-        return redirect(f"{failure_base}{joiner}payment_id={payment.pk}")
+        return redirect(_frontend_return(failure_base, payment))
+
+
+def _frontend_return(base: str, payment) -> str:
+    joiner = "&" if "?" in base else "?"
+    url = f"{base}{joiner}payment_id={payment.pk}"
+    if (payment.purpose or "").startswith("psy.order:"):
+        url += "&source=shop"
+    return url

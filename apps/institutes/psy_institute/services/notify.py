@@ -65,3 +65,28 @@ def notify_appointment(appointment, event: str) -> None:
         )
     except Exception:
         return
+
+
+def notify_order(order, event: str) -> None:
+    """SMS the patient when an order is paid or shipped. Failures never block checkout."""
+    try:
+        number = order.number
+        if event == "paid":
+            body = f"سفارش {number} ثبت و پرداخت شد."
+        elif event == "shipped":
+            body = f"سفارش {number} ارسال شد."
+            tracking = (order.tracking_code or "").strip()
+            if tracking:
+                body += f" کد رهگیری: {tracking}"
+        else:
+            return
+        phone = _phone(order.patient.user) or order.patient.phone or order.shipping_phone
+        send_sms(
+            phone=phone,
+            body=body,
+            purpose=SmsMessage.Purpose.SHOP,
+            user=order.patient.user,
+            unique_id=f"order:{event}:{order.pk}",
+        )
+    except Exception:
+        return

@@ -7,6 +7,7 @@ Platform-wide wallet, append-only ledger, payments (Vandar IPG), and withdrawals
 - Balance display in toman stays on the frontend.
 - Domain apps must call `finance.services` — never mutate `Wallet.balance` directly.
 - No imports from `psy_institute` (or other domains); use opaque `reference` / `ticket_reference` strings.
+- `confirm_payment` emits `payment_succeeded` (kwargs: `payment`) after the wallet credit. Listeners must not raise. A shop order whose `Payment.purpose` is `psy.order:{id}` is settled by `psy_institute`, not by finance.
 
 ## HTTP API (`/api/v1/finance/`)
 

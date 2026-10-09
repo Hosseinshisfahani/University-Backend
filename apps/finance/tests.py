@@ -179,6 +179,23 @@ class VandarPaymentFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIn("payment_id=", response["Location"])
         self.assertIn("/patient/wallet/payment/success", response["Location"])
+        self.assertNotIn("source=shop", response["Location"])
+
+    def test_shop_callback_redirects_with_shop_source(self):
+        services.create_payment(
+            user=self.user,
+            amount=Decimal("1000"),
+            provider=Payment.Provider.VANDAR,
+            provider_ref="sandbox-shop",
+            purpose="psy.order:9",
+        )
+        response = self.client.get(
+            reverse("finance:vandar-callback"),
+            {"token": "sandbox-shop", "payment_status": "FAILED"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/patient/wallet/payment/failure", response["Location"])
+        self.assertIn("source=shop", response["Location"])
 
     def test_verify_timeout_then_settled_inquiry_credits_once(self):
         services.create_payment(

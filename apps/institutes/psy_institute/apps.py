@@ -12,3 +12,4 @@ class PsyInstituteConfig(AppConfig):
         self.role_admin = "psy_admin"
         self.role_therapist = "psy_therapist"
         self.role_patient = "psy_patient"
+        from . import signals  # noqa: F401

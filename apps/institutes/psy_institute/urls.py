@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from . import admin_api, schedule_admin, views
+from . import admin_api, schedule_admin, shop_api, views
 
 app_name = "psy_institute"
 
@@ -54,6 +54,12 @@ router.register(
     basename="psychometric-response",
 )
 router.register("workshops", views.WorkshopViewSet, basename="workshop")
+router.register(
+    "shop/categories", shop_api.ProductCategoryViewSet, basename="shop-category"
+)
+router.register("shop/products", shop_api.ProductViewSet, basename="shop-product")
+router.register("shop/coupons", shop_api.CouponViewSet, basename="shop-coupon")
+router.register("shop/orders", shop_api.ShopOrderViewSet, basename="shop-order")
 router.register("blog", views.BlogPostViewSet, basename="blog")
 router.register("news", views.NewsSlideViewSet, basename="news")
 router.register("pages", views.SitePageViewSet, basename="page")
@@ -162,6 +168,46 @@ urlpatterns = [
         "admin/finance/appointment-revenue/",
         admin_api.AdminFinanceAppointmentRevenueView.as_view(),
         name="admin-finance-appointment-revenue",
+    ),
+    path(
+        "shop/cart/",
+        shop_api.CartView.as_view(),
+        name="shop-cart",
+    ),
+    path(
+        "shop/cart/items/",
+        shop_api.CartItemListView.as_view(),
+        name="shop-cart-items",
+    ),
+    path(
+        "shop/cart/items/<int:pk>/",
+        shop_api.CartItemDetailView.as_view(),
+        name="shop-cart-item",
+    ),
+    path(
+        "shop/cart/coupon/",
+        shop_api.CartCouponView.as_view(),
+        name="shop-cart-coupon",
+    ),
+    path(
+        "admin/shop/orders/",
+        admin_api.AdminShopOrderListView.as_view(),
+        name="admin-shop-orders",
+    ),
+    path(
+        "admin/shop/orders/<int:pk>/",
+        admin_api.AdminShopOrderDetailView.as_view(),
+        name="admin-shop-order",
+    ),
+    path(
+        "admin/shop/orders/<int:pk>/refund/",
+        admin_api.AdminShopOrderRefundView.as_view(),
+        name="admin-shop-order-refund",
+    ),
+    path(
+        "admin/shop/stats/",
+        admin_api.AdminShopStatsView.as_view(),
+        name="admin-shop-stats",
     ),
     path(
         "patient/workshop-enrollments/",
