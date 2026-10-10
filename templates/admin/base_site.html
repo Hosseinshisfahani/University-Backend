@@ -1,0 +1,71 @@
+{% extends "admin/base.html" %}
+{% load i18n %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<div id="site-name"><a href="{% url 'admin:index' %}">{{ site_header|default:_('Django administration') }}</a></div>
+{% if user.is_anonymous %}
+  {% include "admin/color_theme_toggle.html" %}
+{% endif %}
+{% endblock %}
+
+{% block nav-global %}{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+  .password-field {
+    position: relative;
+    display: block;
+  }
+  .password-field input {
+    width: 100%;
+    box-sizing: border-box;
+    padding-inline-end: 4.5rem;
+  }
+  .password-visibility-toggle {
+    position: absolute;
+    inset-inline-end: 0.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: #447e9b;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.75rem;
+    line-height: 1;
+    padding: 0.35rem 0.45rem;
+  }
+  .password-visibility-toggle:hover,
+  .password-visibility-toggle:focus {
+    color: #036;
+  }
+</style>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll('input[type="password"]').forEach(function (input) {
+      if (input.closest(".password-field")) return;
+      var wrap = document.createElement("span");
+      wrap.className = "password-field";
+      input.parentNode.insertBefore(wrap, input);
+      wrap.appendChild(input);
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "password-visibility-toggle";
+      button.textContent = "نمایش";
+      button.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-label", "نمایش رمز عبور");
+      button.addEventListener("click", function () {
+        var show = input.type === "password";
+        input.type = show ? "text" : "password";
+        button.textContent = show ? "پنهان" : "نمایش";
+        button.setAttribute("aria-pressed", show ? "true" : "false");
+        button.setAttribute("aria-label", show ? "پنهان کردن رمز عبور" : "نمایش رمز عبور");
+      });
+      wrap.appendChild(button);
+    });
+  });
+</script>
+{% endblock %}
