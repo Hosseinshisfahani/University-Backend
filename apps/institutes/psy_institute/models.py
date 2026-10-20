@@ -1,12 +1,14 @@
 """Psychology institute domain models.
 
-Owns clinic people, schedule inventory, appointments, psychometrics,
+It owns clinic people, schedule inventory, appointments, psychometrics,
 workshops, the clinic shop, CMS, and support tickets.
 
-Finance is integrated with opaque reference strings (``payment_ref``,
-``deposit_ledger_ref``, ``refund_ledger_ref``, ``withdrawal_ref``).
-This app never mutates ``Wallet.balance`` — all money movement goes
-through ``apps.finance.services``.
+Finance is integrated with opaque reference strings like:
+(``payment_ref``,``deposit_ledger_ref``, ``refund_ledger_ref``, ``withdrawal_ref``).
+
+This app never mutates ``Wallet.balance`` — all money movement goes through 
+``apps.finance.services``.
+
 """
 
 from __future__ import annotations
