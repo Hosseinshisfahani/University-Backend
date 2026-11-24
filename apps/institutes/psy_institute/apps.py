@@ -5,11 +5,12 @@ class PsyInstituteConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.institutes.psy_institute"
     label = "psy_institute"
-    verbose_name = "مؤسسه روان‌شناسی"
+    verbose_name = "موسسه روانشناسی"
 
-    def ready(self):
-        # Role group names used by permissions.
-        self.role_admin = "psy_admin"
-        self.role_therapist = "psy_therapist"
-        self.role_patient = "psy_patient"
+    def ready(self) -> None:
+        from apps.kernel.tenancy.services import register_institute_adapter
+
+        from .module_adapters import PsyAdapter
         from . import signals  # noqa: F401
+
+        register_institute_adapter("psy", PsyAdapter())

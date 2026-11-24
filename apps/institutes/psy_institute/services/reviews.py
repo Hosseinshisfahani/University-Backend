@@ -1,105 +1,63 @@
-"""Patient-to-therapist ratings and admin comment moderation."""
+"""Psychology review adapter. Eligibility lives on booking.AppointmentReview."""
 
 from __future__ import annotations
 
 from django.db import transaction
-from django.utils import timezone
 
-from ..models import Appointment, PatientProfile, TherapistReview
+from apps.modules.booking.services.reviews import ReviewError as BookingReviewError
+from apps.modules.booking.services.reviews import submit_appointment_review
+from apps.modules.reviews.models import Review
+from apps.modules.reviews.services import ReviewsError, moderate_review
+
+from ..models import PsyReviewContext
 
 
 class ReviewError(Exception):
     pass
 
 
-def _text_status_for_body(body: str) -> str:
-    return (
-        TherapistReview.TextStatus.PENDING
-        if body
-        else TherapistReview.TextStatus.NONE
+def psy_reviews():
+    return Review.objects.filter(appointment_link__isnull=False).select_related(
+        "psy_context__patient__user",
+        "psy_context__appointment",
+        "appointment_link__appointment",
+        "author",
     )
 
 
 @transaction.atomic
-def create_review(
-    *,
-    appointment: Appointment,
-    patient: PatientProfile,
-    rating: int,
-    body: str = "",
-) -> TherapistReview:
-    appointment = Appointment.objects.select_for_update().select_related(
-        "patient", "therapist"
-    ).get(pk=appointment.pk)
-    if appointment.patient_id != patient.id:
-        raise ReviewError("You can only review your own appointments.")
-    if appointment.status != Appointment.Status.COMPLETED:
-        raise ReviewError("Only completed appointments can be reviewed.")
-    if TherapistReview.objects.filter(appointment=appointment).exists():
-        raise ReviewError("This appointment already has a review.")
-    if rating < 1 or rating > 5:
-        raise ReviewError("Rating must be between 1 and 5.")
-
-    text = (body or "").strip()
-    return TherapistReview.objects.create(
-        appointment=appointment,
-        patient=appointment.patient,
-        therapist=appointment.therapist,
-        rating=rating,
-        body=text,
-        text_status=_text_status_for_body(text),
-    )
-
-
-@transaction.atomic
-def approve_review(
-    *,
-    review: TherapistReview,
-    reviewer,
-    admin_note: str = "",
-) -> TherapistReview:
-    review = TherapistReview.objects.select_for_update().get(pk=review.pk)
-    if review.text_status != TherapistReview.TextStatus.PENDING:
-        raise ReviewError("Only pending comments can be approved.")
-    if not review.body.strip():
-        raise ReviewError("No comment to approve.")
-    review.text_status = TherapistReview.TextStatus.APPROVED
-    review.reviewed_by = reviewer
-    review.reviewed_at = timezone.now()
-    review.admin_note = (admin_note or "").strip()
-    review.save(
-        update_fields=[
-            "text_status",
-            "reviewed_by",
-            "reviewed_at",
-            "admin_note",
-            "updated_at",
-        ]
+def create_review(*, appointment, patient, rating: int, body: str = "") -> Review:
+    try:
+        review = submit_appointment_review(
+            appointment=appointment,
+            customer=patient.user,
+            rating=rating,
+            body=body,
+        )
+    except BookingReviewError as exc:
+        raise ReviewError(str(exc)) from exc
+    PsyReviewContext.objects.get_or_create(
+        review=review,
+        defaults={"appointment": appointment, "patient": patient, "institute_id": appointment.institute_id},
     )
     return review
 
 
+def _moderate(review, reviewer, admin_note, status, verb):
+    try:
+        return moderate_review(review=review, status=status, reviewer=reviewer, admin_note=admin_note)
+    except ReviewsError as exc:
+        message = str(exc)
+        if message == "Only pending comments can be moderated.":
+            message = f"Only pending comments can be {verb}."
+        raise ReviewError(message) from exc
+
+
 @transaction.atomic
-def reject_review(
-    *,
-    review: TherapistReview,
-    reviewer,
-    admin_note: str = "",
-) -> TherapistReview:
-    review = TherapistReview.objects.select_for_update().get(pk=review.pk)
-    if review.text_status != TherapistReview.TextStatus.PENDING:
-        raise ReviewError("Only pending comments can be rejected.")
-    review.text_status = TherapistReview.TextStatus.REJECTED
-    review.reviewed_by = reviewer
-    review.reviewed_at = timezone.now()
-    review.admin_note = (admin_note or "").strip()
-    review.save(
-        update_fields=[
-            "text_status",
-            "reviewed_by",
-            "reviewed_at",
-            "admin_note",
-            "updated_at",
-        ]
-    )
-    return review
+def approve_review(*, review: Review, reviewer, admin_note: str = "") -> Review:
+    return _moderate(review, reviewer, admin_note, Review.TextStatus.APPROVED, "approved")
+
+
+@transaction.atomic
+def reject_review(*, review: Review, reviewer, admin_note: str = "") -> Review:
+    return _moderate(review, reviewer, admin_note, Review.TextStatus.REJECTED, "rejected")

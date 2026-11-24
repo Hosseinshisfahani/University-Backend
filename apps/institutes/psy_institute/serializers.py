@@ -3,32 +3,28 @@ import uuid
 from django.utils.text import slugify
 from rest_framework import serializers
 
-from .models import (
+from apps.modules.forms.models import Form
+from apps.modules.forms.models import Response as FormResponse
+from apps.modules.booking.models import (
     Appointment,
     AppointmentSlot,
     AvailabilityException,
-    BlogPost,
+    LeaveRequest,
+    SessionType,
+    TherapistAvailability,
+    TherapistSessionOffer,
+)
+from apps.modules.reviews.models import Review
+
+from .models import (
     ClinicalReport,
     FileAccessRequest,
-    LeaveRequest,
-    NewsSlide,
     PatientProfile,
-    PsychometricForm,
-    PsychometricResponse,
+    PsyReviewContext,
     SessionNote,
-    SessionType,
-    SitePage,
-    TherapistAvailability,
     TherapistProfile,
-    TherapistReview,
-    TherapistSessionOffer,
     Ticket,
     TicketMessage,
-    Workshop,
-    WorkshopCertificate,
-    WorkshopEnrollment,
-    WorkshopResource,
-    WorkshopSession,
 )
 
 
@@ -69,15 +65,20 @@ def _patient_first_name(patient: PatientProfile) -> str:
     return name or "مراجع"
 
 
-def _can_see_review_body(request, review: TherapistReview) -> bool:
-    if review.text_status == TherapistReview.TextStatus.APPROVED:
+def _can_see_review_body(request, review) -> bool:
+    from apps.modules.reviews.models import Review
+
+    if review.text_status == Review.TextStatus.APPROVED:
         return True
     user = getattr(request, "user", None) if request else None
     if not user or not getattr(user, "is_authenticated", False):
         return False
-    if hasattr(user, "patient_profile") and user.patient_profile.id == review.patient_id:
+    patient_id = review.psy_context.patient_id
+    if hasattr(user, "patient_profile") and user.patient_profile.id == patient_id:
         return True
-    if user.is_staff or user.groups.filter(name="psy_admin").exists():
+    from apps.kernel.tenancy.services import is_institute_admin
+
+    if is_institute_admin(user, "psy"):
         return True
     return False
 
@@ -115,9 +116,9 @@ class TherapistProfileSerializer(serializers.ModelSerializer):
     def get_offers(self, obj) -> list:
         offers = getattr(obj, "active_offers", None)
         if offers is None:
-            offers = obj.session_offers.filter(
-                is_active=True, session_type__is_active=True
-            ).select_related("session_type")
+            offers = obj.provider.service_offers.filter(
+                is_active=True, service_type__is_active=True
+            ).select_related("service_type") if obj.provider_id else []
         return [
             {
                 "id": offer.id,
@@ -180,10 +181,10 @@ class AvailabilityExceptionSerializer(serializers.ModelSerializer):
 
 
 class TherapistSessionOfferSerializer(serializers.ModelSerializer):
-    session_type = SessionTypeSerializer(read_only=True)
+    session_type = SessionTypeSerializer(source="service_type", read_only=True)
     session_type_id = serializers.PrimaryKeyRelatedField(
         queryset=SessionType.objects.filter(is_active=True),
-        source="session_type",
+        source="service_type",
         write_only=True,
     )
 
@@ -193,9 +194,15 @@ class TherapistSessionOfferSerializer(serializers.ModelSerializer):
 
 
 class LeaveRequestSerializer(serializers.ModelSerializer):
-    therapist_name = serializers.CharField(
-        source="therapist.display_name", read_only=True
-    )
+    therapist = serializers.SerializerMethodField()
+    therapist_name = serializers.SerializerMethodField()
+
+    def get_therapist(self, obj):
+        profile = getattr(obj.provider, "therapist_profile", None)
+        return profile.id if profile else None
+
+    def get_therapist_name(self, obj) -> str:
+        return obj.provider.display_name
 
     class Meta:
         model = LeaveRequest
@@ -252,8 +259,12 @@ class AdminBookAppointmentSerializer(serializers.Serializer):
 
 
 class AppointmentSlotSerializer(serializers.ModelSerializer):
-    session_type = SessionTypeSerializer(read_only=True)
-    therapist = TherapistProfileSerializer(read_only=True)
+    session_type = SessionTypeSerializer(source="service_type", read_only=True)
+    therapist = serializers.SerializerMethodField()
+
+    def get_therapist(self, obj):
+        profile = getattr(obj.provider, "therapist_profile", None)
+        return TherapistProfileSerializer(profile).data if profile else None
 
     class Meta:
         model = AppointmentSlot
@@ -304,14 +315,15 @@ class AdminAppointmentSlotSerializer(AppointmentSlotSerializer):
 
 
 class TherapistReviewSerializer(serializers.ModelSerializer):
+    appointment = serializers.IntegerField(source="psy_context.appointment_id", read_only=True)
+    patient = serializers.IntegerField(source="psy_context.patient_id", read_only=True)
+    therapist = serializers.IntegerField(source="target_id", read_only=True)
     patient_first_name = serializers.SerializerMethodField()
-    therapist_name = serializers.CharField(
-        source="therapist.display_name", read_only=True
-    )
+    therapist_name = serializers.SerializerMethodField()
     body = serializers.SerializerMethodField()
 
     class Meta:
-        model = TherapistReview
+        model = Review
         fields = [
             "id",
             "appointment",
@@ -328,10 +340,14 @@ class TherapistReviewSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_patient_first_name(self, obj: TherapistReview) -> str:
-        return _patient_first_name(obj.patient)
+    def get_patient_first_name(self, obj: Review) -> str:
+        return _patient_first_name(obj.psy_context.patient)
 
-    def get_body(self, obj: TherapistReview) -> str:
+    def get_therapist_name(self, obj: Review) -> str:
+        target = obj.target
+        return getattr(target, "display_name", "") if target else ""
+
+    def get_body(self, obj: Review) -> str:
         request = self.context.get("request")
         if _can_see_review_body(request, obj):
             return obj.body
@@ -342,7 +358,7 @@ class PublicTherapistReviewSerializer(serializers.ModelSerializer):
     patient_first_name = serializers.SerializerMethodField()
 
     class Meta:
-        model = TherapistReview
+        model = Review
         fields = [
             "id",
             "rating",
@@ -351,18 +367,19 @@ class PublicTherapistReviewSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
-    def get_patient_first_name(self, obj: TherapistReview) -> str:
-        return _patient_first_name(obj.patient)
+    def get_patient_first_name(self, obj: Review) -> str:
+        return _patient_first_name(obj.psy_context.patient)
 
 
 class AdminTherapistReviewSerializer(serializers.ModelSerializer):
+    appointment = serializers.IntegerField(source="psy_context.appointment_id", read_only=True)
+    patient = serializers.IntegerField(source="psy_context.patient_id", read_only=True)
+    therapist = serializers.IntegerField(source="target_id", read_only=True)
     patient_first_name = serializers.SerializerMethodField()
-    therapist_name = serializers.CharField(
-        source="therapist.display_name", read_only=True
-    )
+    therapist_name = serializers.SerializerMethodField()
 
     class Meta:
-        model = TherapistReview
+        model = Review
         fields = [
             "id",
             "appointment",
@@ -379,8 +396,12 @@ class AdminTherapistReviewSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_patient_first_name(self, obj: TherapistReview) -> str:
-        return _patient_first_name(obj.patient)
+    def get_patient_first_name(self, obj: Review) -> str:
+        return _patient_first_name(obj.psy_context.patient)
+
+    def get_therapist_name(self, obj: Review) -> str:
+        target = obj.target
+        return getattr(target, "display_name", "") if target else ""
 
 
 class SubmitTherapistReviewSerializer(serializers.Serializer):
@@ -389,13 +410,16 @@ class SubmitTherapistReviewSerializer(serializers.Serializer):
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
+    patient = serializers.IntegerField(source="patient_id", read_only=True)
+    therapist = serializers.IntegerField(source="therapist_id", read_only=True)
+    session_type = serializers.IntegerField(source="service_type_id", read_only=True)
     therapist_name = serializers.CharField(
-        source="therapist.display_name", read_only=True
+        source="provider.display_name", read_only=True
     )
     patient_name = serializers.SerializerMethodField()
-    session_type_name = serializers.CharField(source="session_type.name", read_only=True)
+    session_type_name = serializers.CharField(source="service_type.name", read_only=True)
     session_type_modality = serializers.CharField(
-        source="session_type.modality", read_only=True
+        source="service_type.modality", read_only=True
     )
     review = serializers.SerializerMethodField()
 
@@ -432,8 +456,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
 
     def get_review(self, obj: Appointment):
         try:
-            review = obj.review
-        except TherapistReview.DoesNotExist:
+            review = obj.review_context.review
+        except PsyReviewContext.DoesNotExist:
             return None
         if review is None:
             return None
@@ -508,7 +532,7 @@ class ClinicalReportSerializer(serializers.ModelSerializer):
     )
     patient_name = serializers.SerializerMethodField()
     session_type_name = serializers.CharField(
-        source="appointment.session_type.name", read_only=True
+        source="appointment.service_type.name", read_only=True
     )
 
     class Meta:
@@ -603,12 +627,14 @@ class FileAccessRequestSerializer(serializers.ModelSerializer):
 
 
 class MissingReportAppointmentSerializer(serializers.ModelSerializer):
+    patient = serializers.IntegerField(source="patient_id", read_only=True)
+    therapist = serializers.IntegerField(source="therapist_id", read_only=True)
     patient_name = serializers.SerializerMethodField()
     therapist_name = serializers.CharField(
-        source="therapist.display_name", read_only=True
+        source="provider.display_name", read_only=True
     )
     session_type_name = serializers.CharField(
-        source="session_type.name", read_only=True
+        source="service_type.name", read_only=True
     )
 
     class Meta:
@@ -640,7 +666,7 @@ class RejectFileAccessSerializer(serializers.Serializer):
 
 class PsychometricFormSerializer(serializers.ModelSerializer):
     class Meta:
-        model = PsychometricForm
+        model = Form
         fields = [
             "id",
             "title",
@@ -653,10 +679,13 @@ class PsychometricFormSerializer(serializers.ModelSerializer):
 
 
 class PsychometricResponseSerializer(serializers.ModelSerializer):
+    patient = serializers.SerializerMethodField()
     patient_name = serializers.SerializerMethodField()
+    routed_therapist = serializers.SerializerMethodField()
+    form_version = serializers.IntegerField(source="version.version", read_only=True)
 
     class Meta:
-        model = PsychometricResponse
+        model = FormResponse
         fields = [
             "id",
             "form",
@@ -671,8 +700,18 @@ class PsychometricResponseSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "form_version", "submitted_at", "status", "patient", "patient_name"]
 
-    def get_patient_name(self, obj: PsychometricResponse) -> str:
-        user = obj.patient.user
+    def get_patient(self, obj: FormResponse):
+        profile = PatientProfile.objects.filter(user_id=obj.respondent_id).first()
+        return profile.id if profile else None
+
+    def get_routed_therapist(self, obj: FormResponse):
+        if not obj.assigned_to_id:
+            return None
+        profile = TherapistProfile.objects.filter(user_id=obj.assigned_to_id).first()
+        return profile.id if profile else None
+
+    def get_patient_name(self, obj: FormResponse) -> str:
+        user = obj.respondent
         full = f"{user.first_name} {user.last_name}".strip()
         return full or user.username
 
@@ -680,389 +719,6 @@ class PsychometricResponseSerializer(serializers.ModelSerializer):
 class SubmitPsychometricSerializer(serializers.Serializer):
     answers = serializers.JSONField()
     routed_therapist_id = serializers.IntegerField(required=False, allow_null=True)
-
-
-class WorkshopSerializer(serializers.ModelSerializer):
-    instructor_id = serializers.PrimaryKeyRelatedField(
-        source="instructor",
-        queryset=TherapistProfile.objects.all(),
-        allow_null=True,
-        required=False,
-    )
-    instructor_name = serializers.SerializerMethodField()
-    seats_taken = serializers.SerializerMethodField()
-    seats_remaining = serializers.SerializerMethodField()
-    is_full = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Workshop
-        fields = [
-            "id",
-            "title",
-            "slug",
-            "description",
-            "body_md",
-            "instructor_id",
-            "instructor_name",
-            "capacity",
-            "price",
-            "starts_at",
-            "ends_at",
-            "banner_image",
-            "recording_url",
-            "is_published",
-            "certificate_enabled",
-            "seats_taken",
-            "seats_remaining",
-            "is_full",
-        ]
-
-    def get_instructor_name(self, obj: Workshop) -> str | None:
-        return obj.instructor.display_name if obj.instructor_id else None
-
-    def get_seats_taken(self, obj: Workshop) -> int:
-        from .services.workshops import occupied_seats
-
-        return occupied_seats(obj)
-
-    def get_seats_remaining(self, obj: Workshop) -> int:
-        from .services.workshops import seats_remaining
-
-        return seats_remaining(obj)
-
-    def get_is_full(self, obj: Workshop) -> bool:
-        return self.get_seats_remaining(obj) <= 0
-
-    def validate(self, attrs):
-        is_published = attrs.get(
-            "is_published", getattr(self.instance, "is_published", False)
-        )
-        if is_published:
-            instructor = attrs.get(
-                "instructor", getattr(self.instance, "instructor", None)
-            )
-            starts_at = attrs.get(
-                "starts_at", getattr(self.instance, "starts_at", None)
-            )
-            capacity = attrs.get(
-                "capacity", getattr(self.instance, "capacity", None)
-            )
-            if not instructor:
-                raise serializers.ValidationError(
-                    {"instructor_id": "Instructor required to publish."}
-                )
-            if not starts_at:
-                raise serializers.ValidationError(
-                    {"starts_at": "Start time required to publish."}
-                )
-            if not capacity or capacity < 1:
-                raise serializers.ValidationError(
-                    {"capacity": "Capacity must be at least 1."}
-                )
-        return attrs
-
-
-class WorkshopResourcePublicSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    sort_order = serializers.IntegerField()
-    title = serializers.CharField()
-    kind = serializers.CharField()
-    has_file = serializers.BooleanField()
-    file_url = serializers.CharField(allow_null=True)
-    is_locked = serializers.BooleanField()
-    session_id = serializers.IntegerField(allow_null=True)
-
-
-class WorkshopSessionPublicSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    sort_order = serializers.IntegerField()
-    title = serializers.CharField()
-    summary = serializers.CharField()
-    starts_at = serializers.DateTimeField(allow_null=True)
-    ends_at = serializers.DateTimeField(allow_null=True)
-    has_meeting = serializers.BooleanField()
-    has_recording = serializers.BooleanField()
-    meeting_url = serializers.CharField(allow_null=True)
-    recording_url = serializers.CharField(allow_null=True)
-    is_locked = serializers.BooleanField()
-    completed = serializers.BooleanField()
-    resources = WorkshopResourcePublicSerializer(many=True)
-
-
-class WorkshopCertificateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WorkshopCertificate
-        fields = ["id", "certificate_code", "issued_at", "file"]
-        read_only_fields = fields
-
-
-class WorkshopDetailSerializer(WorkshopSerializer):
-    viewer_has_access = serializers.SerializerMethodField()
-    progress_percent = serializers.SerializerMethodField()
-    certificate = serializers.SerializerMethodField()
-    sessions = serializers.SerializerMethodField()
-    resources = serializers.SerializerMethodField()
-
-    class Meta(WorkshopSerializer.Meta):
-        fields = WorkshopSerializer.Meta.fields + [
-            "viewer_has_access",
-            "progress_percent",
-            "certificate",
-            "sessions",
-            "resources",
-        ]
-
-    def _access(self, obj: Workshop) -> bool:
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        from .services.workshops import viewer_has_content_access
-
-        return viewer_has_content_access(user=user, workshop=obj)
-
-    def _enrollment(self, obj: Workshop):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        from .services.workshops import get_active_enrollment
-
-        return get_active_enrollment(user=user, workshop=obj)
-
-    def get_viewer_has_access(self, obj: Workshop) -> bool:
-        return self._access(obj)
-
-    def get_progress_percent(self, obj: Workshop):
-        from .services.workshops import progress_percent
-
-        return progress_percent(enrollment=self._enrollment(obj), workshop=obj)
-
-    def get_certificate(self, obj: Workshop):
-        enrollment = self._enrollment(obj)
-        if not enrollment:
-            return None
-        cert = WorkshopCertificate.objects.filter(enrollment=enrollment).first()
-        if not cert:
-            return None
-        return WorkshopCertificateSerializer(cert).data
-
-    def _serialize_resource(self, resource: WorkshopResource, *, access: bool) -> dict:
-        has_file = bool(resource.file_url)
-        return {
-            "id": resource.id,
-            "sort_order": resource.sort_order,
-            "title": resource.title,
-            "kind": resource.kind,
-            "has_file": has_file,
-            "file_url": resource.file_url if access and has_file else None,
-            "is_locked": not access and has_file,
-            "session_id": resource.session_id,
-        }
-
-    def get_sessions(self, obj: Workshop) -> list:
-        access = self._access(obj)
-        enrollment = self._enrollment(obj)
-        completed_ids: set[int] = set()
-        if enrollment:
-            completed_ids = set(
-                enrollment.session_progress.values_list("session_id", flat=True)
-            )
-        sessions = obj.sessions.prefetch_related("resources").all()
-        out = []
-        for session in sessions:
-            has_meeting = bool(session.meeting_url)
-            has_recording = bool(session.recording_url)
-            resources = [
-                self._serialize_resource(r, access=access)
-                for r in session.resources.all()
-            ]
-            out.append(
-                {
-                    "id": session.id,
-                    "sort_order": session.sort_order,
-                    "title": session.title,
-                    "summary": session.summary,
-                    "starts_at": session.starts_at,
-                    "ends_at": session.ends_at,
-                    "has_meeting": has_meeting,
-                    "has_recording": has_recording,
-                    "meeting_url": session.meeting_url if access and has_meeting else None,
-                    "recording_url": (
-                        session.recording_url if access and has_recording else None
-                    ),
-                    "is_locked": not access and (has_meeting or has_recording),
-                    "completed": session.id in completed_ids,
-                    "resources": resources,
-                }
-            )
-        return out
-
-    def get_resources(self, obj: Workshop) -> list:
-        """Workshop-level resources (not tied to a session)."""
-        access = self._access(obj)
-        rows = obj.resources.filter(session__isnull=True)
-        return [self._serialize_resource(r, access=access) for r in rows]
-
-
-class WorkshopSessionWriteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WorkshopSession
-        fields = [
-            "id",
-            "sort_order",
-            "title",
-            "summary",
-            "starts_at",
-            "ends_at",
-            "meeting_url",
-            "recording_url",
-        ]
-        read_only_fields = ["id"]
-
-
-class WorkshopResourceWriteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WorkshopResource
-        fields = [
-            "id",
-            "session",
-            "sort_order",
-            "title",
-            "kind",
-            "file_url",
-        ]
-        read_only_fields = ["id"]
-
-
-class WorkshopEnrollmentSerializer(serializers.ModelSerializer):
-    workshop_title = serializers.CharField(source="workshop.title", read_only=True)
-    workshop_slug = serializers.CharField(source="workshop.slug", read_only=True)
-    workshop_starts_at = serializers.DateTimeField(
-        source="workshop.starts_at", read_only=True, allow_null=True
-    )
-    workshop_ends_at = serializers.DateTimeField(
-        source="workshop.ends_at", read_only=True, allow_null=True
-    )
-    workshop_banner_image = serializers.ImageField(
-        source="workshop.banner_image", read_only=True
-    )
-    instructor_name = serializers.SerializerMethodField()
-    patient_name = serializers.SerializerMethodField()
-    patient_phone = serializers.CharField(source="patient.phone", read_only=True)
-
-    class Meta:
-        model = WorkshopEnrollment
-        fields = [
-            "id",
-            "workshop",
-            "workshop_title",
-            "workshop_slug",
-            "workshop_starts_at",
-            "workshop_ends_at",
-            "workshop_banner_image",
-            "instructor_name",
-            "patient",
-            "patient_name",
-            "patient_phone",
-            "status",
-            "price_snapshot",
-            "hold_expires_at",
-            "payment_ref",
-            "deposit_ledger_ref",
-            "refund_ledger_ref",
-            "canceled_at",
-            "cancellation_reason",
-            "enrolled_at",
-        ]
-        read_only_fields = fields
-
-    def get_instructor_name(self, obj: WorkshopEnrollment) -> str | None:
-        inst = obj.workshop.instructor
-        return inst.display_name if inst else None
-
-    def get_patient_name(self, obj: WorkshopEnrollment) -> str:
-        user = obj.patient.user
-        full = f"{user.first_name} {user.last_name}".strip()
-        return full or user.username
-
-
-class ConfirmWorkshopEnrollmentSerializer(serializers.Serializer):
-    payment_ref = serializers.CharField(max_length=64)
-    idempotency_key = serializers.CharField(max_length=64)
-
-
-class CancelWorkshopEnrollmentSerializer(serializers.Serializer):
-    reason = serializers.CharField(required=False, allow_blank=True)
-
-
-class BlogPostSerializer(serializers.ModelSerializer):
-    author_name = serializers.SerializerMethodField()
-    author_therapist_id = serializers.SerializerMethodField()
-
-    class Meta:
-        model = BlogPost
-        fields = [
-            "id",
-            "title",
-            "slug",
-            "excerpt",
-            "body",
-            "cover_image",
-            "is_published",
-            "published_at",
-            "author_name",
-            "author_therapist_id",
-        ]
-        read_only_fields = ["author_name", "author_therapist_id"]
-
-    def get_author_name(self, obj: BlogPost) -> str | None:
-        if not obj.author_id:
-            return None
-        user = obj.author
-        full = (user.get_full_name() or "").strip()
-        return full or user.username
-
-    def get_author_therapist_id(self, obj: BlogPost) -> int | None:
-        if not obj.author_id:
-            return None
-        profile = getattr(obj.author, "therapist_profile", None)
-        return profile.id if profile else None
-
-
-class NewsSlideSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = NewsSlide
-        fields = [
-            "id",
-            "title",
-            "body",
-            "image",
-            "link_url",
-            "link_label",
-            "sort_order",
-            "is_published",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = ["id", "created_at", "updated_at"]
-        extra_kwargs = {
-            "image": {"required": False, "allow_null": True},
-        }
-
-    def to_internal_value(self, data):
-        """Keep the current file when JSON resubmits a media URL or empty value."""
-        if hasattr(data, "copy"):
-            data = data.copy()
-        image = data.get("image") if hasattr(data, "get") else None
-        if image is None or isinstance(image, str):
-            try:
-                data.pop("image")
-            except (KeyError, AttributeError, TypeError):
-                pass
-        return super().to_internal_value(data)
-
-
-class SitePageSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SitePage
-        fields = ["id", "key", "title", "body", "updated_at"]
 
 
 class TicketMessageSerializer(serializers.ModelSerializer):

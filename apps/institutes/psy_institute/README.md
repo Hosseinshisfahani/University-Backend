@@ -1,6 +1,6 @@
 # Psychology Institute (`apps.institutes.psy_institute`)
 
-Domain app for the university psychology center: therapists, patients, session types, admin-owned availability templates → generated or one-off slots, appointments with 24h refund policy, leave requests, psychometric forms (JSON schema), workshops, the clinic shop, blog/about, and tickets (including wallet withdrawals via `apps.finance`).
+Domain app for the university psychology center: therapists, patients, session types, admin-owned availability templates → generated or one-off slots, appointments with 24h refund policy, leave requests, psychometric forms (JSON schema), workshops, the clinic shop, blog/about, and tickets (including wallet withdrawals via `apps.kernel.finance`).
 
 ## Roles (Django groups)
 
@@ -19,7 +19,7 @@ Bootstrap groups: `POST /api/v1/psy/roles/ensure-groups/` (admin).
 - `services.book_slot` / `confirm_appointment_payment` / `admin_book_appointment` / `cancel_appointment` / `move_appointment`
 - `services.submit_leave_request` / `approve_leave_request` / `reject_leave_request`
 
-Wallet captures and refunds go through `apps.finance.services` with opaque refs like `psy.appointment:42`. Offline admin confirms (`payment_ref=offline`) skip the wallet ledger.
+Wallet captures and refunds go through `apps.kernel.finance.services` with opaque refs like `psy.appointment:42`. Offline admin confirms (`payment_ref=offline`) skip the wallet ledger.
 
 ## Shop
 

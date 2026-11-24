@@ -1,6 +1,6 @@
 # Backend — Django REST Modular Monolith
 
-Single Django project, multiple isolated domain apps, one shared PostgreSQL database. See [ARCHITECTURE.md](../ARCHITECTURE.md) for the full specification.
+Single Django project, multiple isolated domain apps, one shared PostgreSQL database. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full specification.
 
 ## Structure
 
@@ -16,18 +16,19 @@ backend/
     urls.py                    # everything versioned under /api/v1/
     wsgi.py / asgi.py
   apps/
-    core/                      # shared abstract models (TimeStampedModel) — no domain logic
-    accounts/                  # custom User model + cookie-based JWT auth
-    finance/                   # platform wallet, ledger, payments (SEP), withdrawals (IRR)
-    notifications/             # platform SMS / notifications
-    university_services/       # domain: core university operational services
-    student_services/          # domain: student affairs modules and portals
+    kernel/                    # platform kernel: every institute and module depends on it
+      core/                    # TimeStampedModel, API middleware, private media storage, health check
+      accounts/                # custom User model + cookie-based JWT auth
+      tenancy/                 # institutes, memberships, domains, module registry
+      finance/                 # platform wallet, ledger, payments (SEP), withdrawals (IRR)
+      notifications/           # platform SMS / notifications
+    modules/                   # shared tenant-scoped capabilities
+      content/ reviews/ forms/ shop/ lms/ booking/
     institutes/
       psy_institute/           # psychology center (scheduling, tests, workshops, tickets)
-    lms_platform/              # domain: LMS for courses and workshops
 ```
 
-The four domain directories are namespaces. `core`, `accounts`, `finance`, and `notifications` are foundational. `institutes.psy_institute` is the first fully scaffolded domain app.
+Three layers: the platform kernel (`kernel/core`, `kernel/accounts`, `kernel/tenancy`, `kernel/finance`, `kernel/notifications`), shared `modules/*`, and `institutes/*`. Modules and the kernel never import an institute. `institutes.psy_institute` is the only institute today.
 
 ## Setup
 
@@ -65,11 +66,11 @@ Settings default to `config.settings.dev`; production runs with `DJANGO_SETTINGS
 - Access and refresh JWTs are issued **only** as `HttpOnly`, `Secure`, `SameSite=Lax` cookies — never in JSON bodies, never readable by JavaScript.
 - The refresh cookie is path-scoped to `/api/v1/auth/` so it never travels with regular API requests.
 - Refresh tokens rotate on every refresh and the old one is blacklisted; logout blacklists and clears everything.
-- Unsafe methods on cookie-authenticated requests are CSRF-checked (`apps/accounts/authentication.py`); the frontend echoes the CSRF cookie in the `X-CSRFToken` header.
+- Unsafe methods on cookie-authenticated requests are CSRF-checked (`apps/kernel/accounts/authentication.py`); the frontend echoes the CSRF cookie in the `X-CSRFToken` header.
 
 ## Rules for new apps
 
 1. One domain concern per app; apps own their models, serializers, views, urls.
 2. Reads across apps: direct imports/ORM. Writes across apps: **Django Signals only**.
 3. Register new apps in `LOCAL_APPS` (`config/settings/base.py`) and mount their urls in `config/urls.py` under `/api/v1/`.
-4. `core` never imports from domain apps.
+4. `kernel/*` never imports from `modules/*` or `institutes/*`.

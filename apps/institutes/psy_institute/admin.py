@@ -41,6 +41,7 @@ class TherapistProfileAdmin(admin.ModelAdmin):
 
 @admin.register(models.PatientProfile)
 class PatientProfileAdmin(admin.ModelAdmin):
+    exclude = ("institute",)
     list_display = ("id", "user", "phone", "national_id")
     search_fields = ("user__username", "national_id", "phone")
 
@@ -96,6 +97,7 @@ class NewsSlideAdmin(admin.ModelAdmin):
 
 @admin.register(models.Ticket)
 class TicketAdmin(admin.ModelAdmin):
+    exclude = ("institute",)
     list_display = ("id", "patient", "type", "subject", "status", "created_at")
     list_filter = ("type", "status")
 
@@ -109,6 +111,7 @@ admin.site.register(models.SessionNote)
 
 @admin.register(models.ClinicalReport)
 class ClinicalReportAdmin(admin.ModelAdmin):
+    exclude = ("institute",)
     list_display = ("id", "appointment", "therapist", "patient", "created_at")
     list_filter = ("therapist",)
     search_fields = (
@@ -121,6 +124,7 @@ class ClinicalReportAdmin(admin.ModelAdmin):
 
 @admin.register(models.FileAccessRequest)
 class FileAccessRequestAdmin(admin.ModelAdmin):
+    exclude = ("institute",)
     list_display = (
         "id",
         "therapist",

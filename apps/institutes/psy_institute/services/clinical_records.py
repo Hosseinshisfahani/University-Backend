@@ -8,8 +8,9 @@ from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 
+from apps.modules.booking.models import Appointment
+
 from ..models import (
-    Appointment,
     ClinicalReport,
     FileAccessRequest,
     PatientProfile,
@@ -27,7 +28,7 @@ def missing_report_appointments(*, therapist: TherapistProfile | None = None):
     qs = Appointment.objects.filter(
         status=Appointment.Status.COMPLETED,
         clinical_report__isnull=True,
-    ).select_related("patient__user", "therapist", "session_type")
+    ).select_related("customer", "provider", "service_type")
     if therapist is not None:
         qs = qs.filter(therapist=therapist)
     return qs.order_by("starts_at")

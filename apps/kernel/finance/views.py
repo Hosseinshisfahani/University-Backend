@@ -1,0 +1,273 @@
+from django.conf import settings
+from django.shortcuts import redirect
+from rest_framework import mixins, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from . import services
+from .models import LedgerEntry, Payment, WithdrawalRequest
+from .serializers import (
+    ConfirmPaymentSerializer,
+    CreatePaymentSerializer,
+    CreateWithdrawalSerializer,
+    LedgerEntrySerializer,
+    PaymentSerializer,
+    RejectWithdrawalSerializer,
+    VandarInitiateSerializer,
+    WalletSerializer,
+    WithdrawalSerializer,
+)
+
+
+class IsPlatformFinance(BasePermission):
+    """Platform ledger authority. Generic is_staff is not enough."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and user.has_perm("finance.manage_platform_finance"))
+
+
+class WalletView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        wallet = services.get_or_create_wallet(request.user)
+        return Response(WalletSerializer(wallet).data)
+
+
+class LedgerListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        wallet = services.get_or_create_wallet(request.user)
+        qs = LedgerEntry.objects.filter(wallet=wallet)
+
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = min(100, max(1, int(request.query_params.get("page_size", 20))))
+        except (TypeError, ValueError):
+            page_size = 20
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = qs[start:end]
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "results": LedgerEntrySerializer(items, many=True).data,
+            }
+        )
+
+
+class PaymentViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PaymentSerializer
+
+    def get_queryset(self):
+        qs = Payment.objects.filter(user=self.request.user)
+        if IsPlatformFinance().has_permission(self.request, self):
+            qs = Payment.objects.all()
+        return qs.order_by("-created_at")
+
+    def create(self, request, *args, **kwargs):
+        ser = CreatePaymentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            services.assert_public_purpose(ser.validated_data.get("purpose", ""))
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        payment = services.create_payment(
+            user=request.user,
+            amount=ser.validated_data["amount"],
+            purpose=ser.validated_data.get("purpose", ""),
+            provider=ser.validated_data.get("provider", Payment.Provider.VANDAR),
+            metadata=ser.validated_data.get("metadata"),
+        )
+        return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsPlatformFinance])
+    def confirm(self, request, pk=None):
+        try:
+            payment = Payment.objects.get(pk=pk)
+        except Payment.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        ser = ConfirmPaymentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            payment = services.confirm_payment(
+                payment=payment,
+                provider_ref=ser.validated_data.get("provider_ref", ""),
+                metadata=ser.validated_data.get("metadata"),
+            )
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PaymentSerializer(payment).data)
+
+
+class WithdrawalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = WithdrawalSerializer
+
+    def get_queryset(self):
+        if IsPlatformFinance().has_permission(self.request, self):
+            return WithdrawalRequest.objects.select_related("wallet").all()
+        wallet = services.get_or_create_wallet(self.request.user)
+        return WithdrawalRequest.objects.filter(wallet=wallet)
+
+    def create(self, request, *args, **kwargs):
+        ser = CreateWithdrawalSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            withdrawal = services.create_withdrawal(
+                user=request.user,
+                amount=ser.validated_data["amount"],
+                bank_details=ser.validated_data["bank_details"],
+                ticket_reference=ser.validated_data.get("ticket_reference", ""),
+                idempotency_key=ser.validated_data["idempotency_key"],
+            )
+        except services.InsufficientFunds as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WithdrawalSerializer(withdrawal).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsPlatformFinance])
+    def approve(self, request, pk=None):
+        withdrawal = self.get_object()
+        try:
+            withdrawal = services.approve_withdrawal(
+                withdrawal=withdrawal, processed_by=request.user
+            )
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WithdrawalSerializer(withdrawal).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsPlatformFinance])
+    def paid(self, request, pk=None):
+        withdrawal = self.get_object()
+        try:
+            withdrawal = services.mark_withdrawal_paid(
+                withdrawal=withdrawal, processed_by=request.user
+            )
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WithdrawalSerializer(withdrawal).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsPlatformFinance])
+    def reject(self, request, pk=None):
+        withdrawal = self.get_object()
+        ser = RejectWithdrawalSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            withdrawal = services.reject_withdrawal(
+                withdrawal=withdrawal,
+                processed_by=request.user,
+                reason=ser.validated_data.get("reason", ""),
+            )
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(WithdrawalSerializer(withdrawal).data)
+
+
+class VandarInitiateView(APIView):
+    """Authenticated: create a pending Vandar payment and return the redirect URL."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = VandarInitiateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            services.assert_public_purpose(ser.validated_data.get("purpose", ""))
+            result = services.initiate_vandar_payment(
+                user=request.user,
+                amount=ser.validated_data["amount"],
+                purpose=ser.validated_data.get("purpose", ""),
+            )
+        except services.FinanceError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "payment": PaymentSerializer(result["payment"]).data,
+                "redirect_url": result["redirect_url"],
+                "provider_ref": result["provider_ref"],
+                "sandbox": result["sandbox"],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class VandarCallbackView(APIView):
+    """Public Vandar return URL. Redirects the browser to the frontend."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return self._handle(request.query_params.dict())
+
+    def post(self, request):
+        data = {}
+        if hasattr(request.data, "dict"):
+            data = request.data.dict()
+        elif isinstance(request.data, dict):
+            data = dict(request.data)
+        data = {**request.query_params.dict(), **data}
+        return self._handle(data)
+
+    def _handle(self, data: dict):
+        failure_base = settings.VANDAR_FRONTEND_FAILURE_URL
+        try:
+            payment = services.handle_vandar_callback(data=data)
+        except services.FinanceError:
+            return redirect(failure_base)
+
+        return redirect(_frontend_return(payment, success=payment.status == Payment.Status.SUCCEEDED))
+
+
+def _frontend_return(payment, *, success: bool) -> str:
+    """Send the payer back to the institute that started the payment.
+
+    A missing origin, or the psychology institute, keeps the existing wallet pages.
+    """
+    origin = (payment.metadata or {}).get("origin") or {}
+    slug = origin.get("institute") or ""
+    path = origin.get("path") or ""
+    if not slug or slug == "psy":
+        base = (
+            settings.VANDAR_FRONTEND_SUCCESS_URL
+            if success
+            else settings.VANDAR_FRONTEND_FAILURE_URL
+        )
+        joiner = "&" if "?" in base else "?"
+        url = f"{base}{joiner}payment_id={payment.pk}"
+        purpose = payment.purpose or ""
+        if any(purpose.startswith(prefix) for prefix in services.SHOP_ORDER_PURPOSE_PREFIXES):
+            url += "&source=shop"
+        return url
+    status = "success" if success else "failed"
+    suffix = path if path.startswith("/") else f"/{path}" if path else ""
+    return f"{_institute_return_base(slug)}{suffix}?payment_id={payment.pk}&status={status}"
+
+
+def _institute_return_base(slug: str) -> str:
+    from apps.kernel.tenancy.models import InstituteDomain
+
+    domain = (
+        InstituteDomain.objects.filter(institute__slug=slug, is_active=True, is_canonical=True)
+        .order_by("id")
+        .first()
+    )
+    if domain is not None:
+        return f"https://{domain.hostname}"
+    origin = (getattr(settings, "PLATFORM_FRONTEND_ORIGIN", "") or "").rstrip("/")
+    return f"{origin}/i/{slug}"

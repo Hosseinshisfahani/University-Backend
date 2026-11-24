@@ -8,29 +8,28 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.finance.services import FinanceError, InsufficientFunds
+from apps.kernel.finance.services import FinanceError, InsufficientFunds
+from apps.modules.booking.views import (
+    AvailabilityDetailView,
+    AvailabilityListView,
+    ExceptionDetailView,
+    ExceptionListView,
+    OfferDetailView,
+    OfferListView,
+)
+from .module_adapters import _PsyModuleView
 
 from . import services
-from .models import (
-    AppointmentSlot,
-    AvailabilityException,
-    LeaveRequest,
-    PatientProfile,
-    TherapistAvailability,
-    TherapistProfile,
-    TherapistSessionOffer,
-)
+from apps.modules.booking.models import AppointmentSlot, LeaveRequest
+from .models import PatientProfile, TherapistProfile
 from .permissions import IsPsyAdmin
 from .serializers import (
     AdminAppointmentSlotSerializer,
     AdminBookAppointmentSerializer,
     AdminCreateSlotSerializer,
     AppointmentSerializer,
-    AvailabilityExceptionSerializer,
     LeaveRequestSerializer,
     LeaveReviewSerializer,
-    TherapistAvailabilitySerializer,
-    TherapistSessionOfferSerializer,
 )
 
 
@@ -44,105 +43,73 @@ class _AdminScheduleMixin:
 _PERSIAN_WEEKDAY_ORDER = {5: 0, 6: 1, 0: 2, 1: 3, 2: 4, 3: 5, 4: 6}
 
 
-class AdminTherapistAvailabilityListCreate(_AdminScheduleMixin, APIView):
+def _alias_offers(payload):
+    rows = payload if isinstance(payload, list) else [payload]
+    for row in rows:
+        if isinstance(row, dict) and "service_type" in row and "session_type" not in row:
+            row["session_type"] = row["service_type"]
+    return payload
+
+
+class AdminTherapistAvailabilityListCreate(_PsyModuleView, AvailabilityListView):
     def get(self, request, therapist_id: int):
-        qs = TherapistAvailability.objects.filter(therapist_id=therapist_id)
-        rows = sorted(
-            qs,
-            key=lambda row: (
-                _PERSIAN_WEEKDAY_ORDER.get(row.weekday, 99),
-                row.start_time,
-            ),
-        )
-        return Response(TherapistAvailabilitySerializer(rows, many=True).data)
+        response = super().get(request, pk=therapist_id)
+        if isinstance(response.data, list):
+            response.data.sort(
+                key=lambda row: (
+                    _PERSIAN_WEEKDAY_ORDER.get(row["weekday"], 99),
+                    row["start_time"],
+                )
+            )
+        return response
 
     def post(self, request, therapist_id: int):
-        therapist = self._therapist(therapist_id)
-        ser = TherapistAvailabilitySerializer(
-            data=request.data, context={"therapist": therapist}
-        )
-        ser.is_valid(raise_exception=True)
-        ser.save(therapist=therapist)
-        return Response(ser.data, status=201)
+        return super().post(request, pk=therapist_id)
 
 
-class AdminTherapistAvailabilityDetail(_AdminScheduleMixin, APIView):
-    def _obj(self, therapist_id: int, pk: int) -> TherapistAvailability:
-        return get_object_or_404(
-            TherapistAvailability, pk=pk, therapist_id=therapist_id
-        )
-
+class AdminTherapistAvailabilityDetail(_PsyModuleView, AvailabilityDetailView):
     def patch(self, request, therapist_id: int, pk: int):
-        obj = self._obj(therapist_id, pk)
-        ser = TherapistAvailabilitySerializer(
-            obj, data=request.data, partial=True, context={"therapist": obj.therapist}
-        )
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(ser.data)
+        return super().patch(request, pk=therapist_id, availability_id=pk)
 
     def delete(self, request, therapist_id: int, pk: int):
-        self._obj(therapist_id, pk).delete()
-        return Response(status=204)
+        return super().delete(request, pk=therapist_id, availability_id=pk)
 
 
-class AdminTherapistOfferListCreate(_AdminScheduleMixin, APIView):
+class AdminTherapistOfferListCreate(_PsyModuleView, OfferListView):
     def get(self, request, therapist_id: int):
-        qs = TherapistSessionOffer.objects.filter(
-            therapist_id=therapist_id
-        ).select_related("session_type")
-        return Response(TherapistSessionOfferSerializer(qs, many=True).data)
+        response = super().get(request, pk=therapist_id)
+        _alias_offers(response.data)
+        return response
 
     def post(self, request, therapist_id: int):
-        therapist = self._therapist(therapist_id)
-        ser = TherapistSessionOfferSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        ser.save(therapist=therapist)
-        return Response(TherapistSessionOfferSerializer(ser.instance).data, status=201)
+        response = super().post(request, pk=therapist_id)
+        if response.status_code < 300:
+            _alias_offers(response.data)
+        return response
 
 
-class AdminTherapistOfferDetail(_AdminScheduleMixin, APIView):
-    def _obj(self, therapist_id: int, pk: int) -> TherapistSessionOffer:
-        return get_object_or_404(
-            TherapistSessionOffer.objects.select_related("session_type"),
-            pk=pk,
-            therapist_id=therapist_id,
-        )
-
+class AdminTherapistOfferDetail(_PsyModuleView, OfferDetailView):
     def patch(self, request, therapist_id: int, pk: int):
-        obj = self._obj(therapist_id, pk)
-        ser = TherapistSessionOfferSerializer(obj, data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(TherapistSessionOfferSerializer(ser.instance).data)
+        response = super().patch(request, pk=therapist_id, offer_id=pk)
+        if response.status_code < 300:
+            _alias_offers(response.data)
+        return response
 
     def delete(self, request, therapist_id: int, pk: int):
-        self._obj(therapist_id, pk).delete()
-        return Response(status=204)
+        return super().delete(request, pk=therapist_id, offer_id=pk)
 
 
-class AdminTherapistExceptionListCreate(_AdminScheduleMixin, APIView):
+class AdminTherapistExceptionListCreate(_PsyModuleView, ExceptionListView):
     def get(self, request, therapist_id: int):
-        qs = AvailabilityException.objects.filter(therapist_id=therapist_id).order_by(
-            "-date"
-        )
-        return Response(AvailabilityExceptionSerializer(qs, many=True).data)
+        return super().get(request, pk=therapist_id)
 
     def post(self, request, therapist_id: int):
-        therapist = self._therapist(therapist_id)
-        ser = AvailabilityExceptionSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        ser.save(therapist=therapist)
-        return Response(ser.data, status=201)
+        return super().post(request, pk=therapist_id)
 
 
-class AdminTherapistExceptionDetail(_AdminScheduleMixin, APIView):
+class AdminTherapistExceptionDetail(_PsyModuleView, ExceptionDetailView):
     def delete(self, request, therapist_id: int, pk: int):
-        obj = get_object_or_404(
-            AvailabilityException, pk=pk, therapist_id=therapist_id
-        )
-        obj.delete()
-        return Response(status=204)
+        return super().delete(request, pk=therapist_id, exception_id=pk)
 
 
 class AdminSlotListCreateView(_AdminScheduleMixin, APIView):
@@ -154,7 +121,7 @@ class AdminSlotListCreateView(_AdminScheduleMixin, APIView):
         if not date_from or not date_to:
             return Response({"detail": "from and to query params are required."}, status=400)
         qs = AppointmentSlot.objects.select_related(
-            "therapist", "session_type", "appointment", "appointment__patient__user"
+            "provider", "service_type", "appointment", "appointment__customer"
         ).order_by("starts_at")
         therapist = request.query_params.get("therapist")
         status_param = request.query_params.get("status")

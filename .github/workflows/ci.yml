@@ -27,9 +27,49 @@ jobs:
           DJANGO_ALLOWED_HOSTS: localhost
           DATABASE_URL: postgres://ci:ci@127.0.0.1:5432/ci
 
+  test:
+    name: Django tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: SQLite suite
+        run: python manage.py test --noinput
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-dummy-not-for-production
+      - name: PostgreSQL suite
+        run: python manage.py test --noinput
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.dev
+          DJANGO_SECRET_KEY: ci-dummy-not-for-production
+          DJANGO_ALLOWED_HOSTS: localhost
+          DATABASE_URL: postgres://ci:ci@127.0.0.1:5432/ci
+      - run: python manage.py dump_module_registry --check
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-dummy-not-for-production
+
   image:
     name: Push GHCR image
-    needs: ci
+    needs: [ci, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

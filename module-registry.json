@@ -1,0 +1,68 @@
+{
+  "modules": [
+    {
+      "id": "content",
+      "prefix": "content",
+      "ready": true,
+      "legacy_prefixes": [
+        "blog",
+        "news",
+        "pages"
+      ]
+    },
+    {
+      "id": "reviews",
+      "prefix": "reviews",
+      "ready": true,
+      "legacy_prefixes": [
+        "admin/reviews",
+        "therapist/reviews"
+      ]
+    },
+    {
+      "id": "forms",
+      "prefix": "forms",
+      "ready": true,
+      "legacy_prefixes": [
+        "psychometric-forms",
+        "psychometric-responses"
+      ]
+    },
+    {
+      "id": "shop",
+      "prefix": "shop",
+      "ready": true,
+      "legacy_prefixes": [
+        "admin/shop",
+        "shop"
+      ]
+    },
+    {
+      "id": "lms",
+      "prefix": "lms",
+      "ready": true,
+      "legacy_prefixes": [
+        "patient/workshop-enrollments",
+        "therapist/workshops",
+        "workshops"
+      ]
+    },
+    {
+      "id": "booking",
+      "prefix": "booking",
+      "ready": true,
+      "legacy_prefixes": [
+        "admin/appointments",
+        "admin/leave-requests",
+        "admin/slots",
+        "appointments",
+        "session-types",
+        "slots",
+        "therapist/availability",
+        "therapist/exceptions",
+        "therapist/leave-requests",
+        "therapist/session-offers"
+      ]
+    }
+  ]
+}

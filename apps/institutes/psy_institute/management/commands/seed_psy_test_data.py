@@ -19,38 +19,39 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from apps.finance import services as finance_services
-from apps.finance.models import LedgerEntry
-from apps.institutes.psy_institute.models import (
+from apps.kernel.finance import services as finance_services
+from apps.kernel.finance.models import LedgerEntry
+from apps.modules.content.models import NewsSlide as ContentNewsSlide
+from apps.modules.content.models import Post
+from apps.modules.content.models import SitePage as ContentSitePage
+from apps.kernel.tenancy.models import Institute
+from apps.modules.booking.models import (
     Appointment,
     AppointmentSlot,
-    BlogPost,
+    LeaveRequest,
+    SessionType,
+    TherapistAvailability,
+    TherapistSessionOffer,
+)
+from apps.institutes.psy_institute.models import (
     ClinicalReport,
     Coupon,
     FileAccessRequest,
-    LeaveRequest,
-    NewsSlide,
     PatientProfile,
     Product,
     ProductCategory,
-    PsychometricForm,
-    PsychometricResponse,
     SessionNote,
-    SessionType,
-    SitePage,
-    TherapistAvailability,
+    PsyReviewContext,
     TherapistProfile,
-    TherapistReview,
-    TherapistSessionOffer,
     Ticket,
     TicketMessage,
-    Workshop,
-    WorkshopCertificate,
-    WorkshopEnrollment,
-    WorkshopResource,
-    WorkshopSession,
-    WorkshopSessionProgress,
 )
+from apps.modules.lms.models import Certificate as WorkshopCertificate
+from apps.modules.lms.models import Course as Workshop
+from apps.modules.lms.models import CourseResource as WorkshopResource
+from apps.modules.lms.models import CourseSession as WorkshopSession
+from apps.modules.lms.models import Enrollment as WorkshopEnrollment
+from apps.modules.lms.models import SessionProgress as WorkshopSessionProgress
 from apps.institutes.psy_institute.services import regenerate_slots_for_therapist
 
 User = get_user_model()
@@ -338,7 +339,9 @@ class Command(BaseCommand):
                 patient.save(update_fields=[*update_fields, "updated_at"])
             patients.append(patient)
 
+        psy = Institute.objects.get(slug="psy")
         session_type, _ = SessionType.objects.get_or_create(
+            institute=psy,
             slug="online-45",
             defaults={
                 "name": "آنلاین ۴۵ دقیقه",
@@ -351,6 +354,7 @@ class Command(BaseCommand):
             },
         )
         in_person_type, _ = SessionType.objects.get_or_create(
+            institute=psy,
             slug="in-person-60",
             defaults={
                 "name": "حضوری ۶۰ دقیقه",
@@ -363,6 +367,7 @@ class Command(BaseCommand):
             },
         )
         intake_type, _ = SessionType.objects.get_or_create(
+            institute=psy,
             slug="online-intake-30",
             defaults={
                 "name": "ارزیابی اولیه آنلاین ۳۰ دقیقه",
@@ -416,7 +421,11 @@ class Command(BaseCommand):
             },
         )
 
-        form, form_created = PsychometricForm.objects.get_or_create(
+        from apps.modules.forms.models import Form
+        from apps.modules.forms.services import publish_schema
+
+        form, form_created = Form.objects.get_or_create(
+            institute=Institute.objects.get(slug="psy"),
             slug="sample-phq",
             defaults={
                 "title": "پرسشنامه نمونه حال روحی",
@@ -431,6 +440,7 @@ class Command(BaseCommand):
             form.is_published = True
             form.schema = SAMPLE_FORM_SCHEMA
             form.save(update_fields=["is_published", "schema", "updated_at"])
+        publish_schema(form=form, schema=form.schema)
 
         if credit_wallet:
             for patient in patients:
@@ -562,7 +572,9 @@ class Command(BaseCommand):
                 user.save()
             else:
                 user.save(update_fields=fields)
-        user.groups.add(Group.objects.get(name=group))
+        from apps.kernel.tenancy.services import PSY_ROLE_FOR_GROUP, grant_psy_role
+
+        grant_psy_role(user, PSY_ROLE_FOR_GROUP[group])
         return user
 
     @transaction.atomic
@@ -790,33 +802,47 @@ class Command(BaseCommand):
         pending_appt = by_ref.get("seed.history:patient2:completed")
         created = {"approved": 0, "pending": 0}
 
-        if approved_appt and not TherapistReview.objects.filter(
+        from apps.modules.reviews.models import Review
+        from apps.modules.reviews.services import record_review
+
+        psy = Institute.objects.get(slug="psy")
+        if approved_appt and not PsyReviewContext.objects.filter(
             appointment=approved_appt
         ).exists():
-            TherapistReview.objects.create(
-                appointment=approved_appt,
-                patient=approved_appt.patient,
-                therapist=approved_appt.therapist,
+            review = record_review(
+                institute=psy,
+                author=approved_appt.patient.user,
+                target=approved_appt.provider,
                 rating=5,
                 body="جلسه خیلی کمک‌کننده بود و حس امنیت داشتم.",
-                text_status=TherapistReview.TextStatus.APPROVED,
+                text_status=Review.TextStatus.APPROVED,
                 reviewed_by=admin_user,
                 reviewed_at=timezone.now(),
+            )
+            PsyReviewContext.objects.create(
+                review=review,
+                appointment=approved_appt,
+                patient=approved_appt.patient,
             )
             created["approved"] = 1
         elif approved_appt:
             created["approved"] = 1
 
-        if pending_appt and not TherapistReview.objects.filter(
+        if pending_appt and not PsyReviewContext.objects.filter(
             appointment=pending_appt
         ).exists():
-            TherapistReview.objects.create(
-                appointment=pending_appt,
-                patient=pending_appt.patient,
-                therapist=pending_appt.therapist,
+            review = record_review(
+                institute=psy,
+                author=pending_appt.patient.user,
+                target=pending_appt.provider,
                 rating=4,
                 body="درمانگر دقیق گوش داد؛ منتظر تأیید برای نمایش عمومی.",
-                text_status=TherapistReview.TextStatus.PENDING,
+                text_status=Review.TextStatus.PENDING,
+            )
+            PsyReviewContext.objects.create(
+                review=review,
+                appointment=pending_appt,
+                patient=pending_appt.patient,
             )
             created["pending"] = 1
         elif pending_appt:
@@ -1015,7 +1041,7 @@ class Command(BaseCommand):
 
     def _seed_psychometric_responses(
         self,
-        form: PsychometricForm,
+        form,
         therapist: TherapistProfile,
         patients: list[PatientProfile],
     ) -> int:
@@ -1028,7 +1054,7 @@ class Command(BaseCommand):
                     "concerns": ["اضطراب"],
                     "notes": "اضطراب قبل از امتحان",
                 },
-                "status": PsychometricResponse.Status.REVIEWED,
+                "status": "reviewed",
                 "reviewer_notes": "پاسخ‌ها با گزارش بالینی هم‌خوان است؛ پیگیری اضطراب امتحان.",
             },
             {
@@ -1039,7 +1065,7 @@ class Command(BaseCommand):
                     "concerns": ["افسردگی", "خواب"],
                     "notes": "",
                 },
-                "status": PsychometricResponse.Status.SUBMITTED,
+                "status": "submitted",
                 "reviewer_notes": "",
             },
             {
@@ -1050,7 +1076,7 @@ class Command(BaseCommand):
                     "concerns": ["روابط"],
                     "notes": "بهبود نسبت به ماه قبل",
                 },
-                "status": PsychometricResponse.Status.SUBMITTED,
+                "status": "submitted",
                 "reviewer_notes": "",
             },
             {
@@ -1061,22 +1087,21 @@ class Command(BaseCommand):
                     "concerns": ["کار/تحصیل"],
                     "notes": "نوبت دوم پرسشنامه",
                 },
-                "status": PsychometricResponse.Status.REVIEWED,
+                "status": "reviewed",
                 "reviewer_notes": "روند مثبت؛ ادامه جلسات آنلاین.",
             },
         ]
 
+        from apps.modules.forms.models import Response as FormResponse
+
         created = 0
-        # Drop earlier seed rows that used a private __seed_key marker
-        PsychometricResponse.objects.filter(
-            form=form,
-            answers__has_key="__seed_key",
-        ).delete()
+        version = form.versions.get(version=form.version)
+        FormResponse.objects.filter(form=form, answers__has_key="__seed_key").delete()
 
         for spec in specs:
-            existing = PsychometricResponse.objects.filter(
+            existing = FormResponse.objects.filter(
                 form=form,
-                patient=spec["patient"],
+                respondent=spec["patient"].user,
                 answers=spec["answers"],
             ).first()
             if existing:
@@ -1087,26 +1112,27 @@ class Command(BaseCommand):
                 if existing.reviewer_notes != spec["reviewer_notes"]:
                     existing.reviewer_notes = spec["reviewer_notes"]
                     changed = True
-                if existing.routed_therapist_id != therapist.id:
-                    existing.routed_therapist = therapist
+                if existing.assigned_to_id != therapist.user_id:
+                    existing.assigned_to = therapist.user
                     changed = True
                 if changed:
                     existing.save(
                         update_fields=[
                             "status",
                             "reviewer_notes",
-                            "routed_therapist",
+                            "assigned_to",
                             "updated_at",
                         ]
                     )
                 continue
 
-            PsychometricResponse.objects.create(
+            FormResponse.objects.create(
+                institute=form.institute,
                 form=form,
-                form_version=form.version,
-                patient=spec["patient"],
+                version=version,
+                respondent=spec["patient"].user,
                 answers=spec["answers"],
-                routed_therapist=therapist,
+                assigned_to=therapist.user,
                 status=spec["status"],
                 reviewer_notes=spec["reviewer_notes"],
             )
@@ -1124,7 +1150,9 @@ class Command(BaseCommand):
         primary_patient = patients[0]
         secondary_patient = patients[1] if len(patients) > 1 else patients[0]
         third_patient = patients[2] if len(patients) > 2 else patients[0]
+        psy = Institute.objects.get(slug="psy")
         paid, _ = Workshop.objects.update_or_create(
+            institute=psy,
             slug="anxiety-skills-paid",
             defaults={
                 "title": "کارگاه مهارت‌های اضطراب",
@@ -1136,7 +1164,7 @@ class Command(BaseCommand):
                     "- بازسازی شناختی\n"
                     "- برنامه مواجهه تدریجی\n"
                 ),
-                "instructor": therapist,
+                "instructor": therapist.user,
                 "capacity": 15,
                 "price": Decimal("350000"),
                 "starts_at": now + timedelta(days=10),
@@ -1191,6 +1219,7 @@ class Command(BaseCommand):
             },
         )
         free, _ = Workshop.objects.update_or_create(
+            institute=psy,
             slug="mindfulness-free",
             defaults={
                 "title": "کارگاه رایگان ذهن‌آگاهی",
@@ -1199,7 +1228,7 @@ class Command(BaseCommand):
                     "## ذهن‌آگاهی برای شروع\n\n"
                     "یک کارگاه کوتاه و رایگان برای آشنایی با تمرین حضور.\n"
                 ),
-                "instructor": therapist,
+                "instructor": therapist.user,
                 "capacity": 30,
                 "price": Decimal("0"),
                 "starts_at": now + timedelta(days=7),
@@ -1222,11 +1251,12 @@ class Command(BaseCommand):
             },
         )
         Workshop.objects.update_or_create(
+            institute=psy,
             slug="draft-group-therapy",
             defaults={
                 "title": "پیش‌نویس گروه درمانی",
                 "description": "منتشر نشده — فقط در پنل ادمین.",
-                "instructor": therapist,
+                "instructor": therapist.user,
                 "capacity": 8,
                 "price": Decimal("500000"),
                 "starts_at": now + timedelta(days=21),
@@ -1238,7 +1268,7 @@ class Command(BaseCommand):
 
         enrollment, created = WorkshopEnrollment.objects.get_or_create(
             workshop=free,
-            patient=primary_patient,
+            user=primary_patient.user,
             defaults={
                 "status": WorkshopEnrollment.Status.ACTIVE,
                 "price_snapshot": Decimal("0"),
@@ -1255,7 +1285,7 @@ class Command(BaseCommand):
 
         paid_enrollment, _ = WorkshopEnrollment.objects.update_or_create(
             workshop=paid,
-            patient=secondary_patient,
+            user=secondary_patient.user,
             defaults={
                 "status": WorkshopEnrollment.Status.ACTIVE,
                 "price_snapshot": paid.price,
@@ -1283,7 +1313,7 @@ class Command(BaseCommand):
 
         WorkshopEnrollment.objects.update_or_create(
             workshop=paid,
-            patient=third_patient,
+            user=third_patient.user,
             defaults={
                 "status": WorkshopEnrollment.Status.CANCELED,
                 "price_snapshot": paid.price,
@@ -1300,7 +1330,13 @@ class Command(BaseCommand):
         )
 
     def _seed_shop(self) -> str:
-        books, _ = ProductCategory.objects.update_or_create(
+        from apps.modules.shop.models import Coupon as ShopCoupon
+        from apps.modules.shop.models import Product as ShopProduct
+        from apps.modules.shop.models import ProductCategory as ShopCategory
+
+        psy = Institute.objects.get(slug="psy")
+        books, _ = ShopCategory.objects.update_or_create(
+            institute=psy,
             slug="books",
             defaults={
                 "name": "کتاب",
@@ -1309,7 +1345,8 @@ class Command(BaseCommand):
                 "is_active": True,
             },
         )
-        audio, _ = ProductCategory.objects.update_or_create(
+        audio, _ = ShopCategory.objects.update_or_create(
+            institute=psy,
             slug="audio",
             defaults={
                 "name": "فایل صوتی",
@@ -1327,7 +1364,8 @@ class Command(BaseCommand):
             ("focus-pack", "بسته تمرکز", audio, "digital", "1500000", "مجموعه تمرین توجه"),
         ]
         for slug, title, category, kind, price, description in products:
-            Product.objects.update_or_create(
+            ShopProduct.objects.update_or_create(
+                institute=psy,
                 slug=slug,
                 defaults={
                     "title": title,
@@ -1340,7 +1378,8 @@ class Command(BaseCommand):
                     "is_available": True,
                 },
             )
-        Coupon.objects.update_or_create(
+        ShopCoupon.objects.update_or_create(
+            institute=psy,
             code="WELCOME10",
             defaults={
                 "kind": Coupon.Kind.PERCENT,
@@ -1401,8 +1440,10 @@ class Command(BaseCommand):
                 "published_at": None,
             },
         ]
+        psy = Institute.objects.get(slug="psy")
         for spec in posts:
-            BlogPost.objects.update_or_create(
+            Post.objects.update_or_create(
+                institute=psy,
                 slug=spec["slug"],
                 defaults={
                     "title": spec["title"],
@@ -1414,7 +1455,7 @@ class Command(BaseCommand):
                     "published_at": spec["published_at"],
                 },
             )
-        published = BlogPost.objects.filter(is_published=True).count()
+        published = Post.objects.filter(institute__slug="psy", is_published=True).count()
         return f"published={published} draft=draft-sleep-hygiene"
 
     def _seed_news(self, media_paths: dict[str, str]) -> str:
@@ -1447,8 +1488,10 @@ class Command(BaseCommand):
                 "is_published": False,
             },
         ]
+        psy = Institute.objects.get(slug="psy")
         for spec in slides:
-            NewsSlide.objects.update_or_create(
+            ContentNewsSlide.objects.update_or_create(
+                institute=psy,
                 title=spec["title"],
                 defaults={
                     "body": spec["body"],
@@ -1459,7 +1502,7 @@ class Command(BaseCommand):
                     "is_published": spec["is_published"],
                 },
             )
-        published = NewsSlide.objects.filter(is_published=True).count()
+        published = ContentNewsSlide.objects.filter(institute__slug="psy", is_published=True).count()
         return f"published={published} draft=اطلاعیه داخلی"
 
     def _seed_tickets(self, admin_user, patients: list[PatientProfile]) -> str:
@@ -1531,7 +1574,9 @@ class Command(BaseCommand):
         return f"rows={created_or_updated}"
 
     def _seed_site_pages(self, media_paths: dict[str, str]) -> str:
-        SitePage.objects.update_or_create(
+        psy = Institute.objects.get(slug="psy")
+        ContentSitePage.objects.update_or_create(
+            institute=psy,
             key="psy-about",
             defaults={
                 "title": "درباره مرکز مشاوره و روان‌شناسی",
@@ -1561,7 +1606,8 @@ class Command(BaseCommand):
                 },
             },
         )
-        SitePage.objects.update_or_create(
+        ContentSitePage.objects.update_or_create(
+            institute=psy,
             key="psy-contact",
             defaults={
                 "title": "تماس با مرکز",

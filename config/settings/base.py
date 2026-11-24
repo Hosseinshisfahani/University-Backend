@@ -41,10 +41,17 @@ THIRD_PARTY_APPS = [
 ]
 
 LOCAL_APPS = [
-    "apps.core",
-    "apps.accounts",
-    "apps.finance",
-    "apps.notifications",
+    "apps.kernel.core",
+    "apps.kernel.accounts",
+    "apps.kernel.tenancy",
+    "apps.modules.content",
+    "apps.modules.reviews",
+    "apps.modules.forms",
+    "apps.modules.shop",
+    "apps.modules.lms",
+    "apps.modules.booking",
+    "apps.kernel.finance",
+    "apps.kernel.notifications",
     "apps.institutes.psy_institute",
 ]
 
@@ -55,18 +62,20 @@ AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     # Outermost so Cache-Control is applied after the rest of the stack.
-    "apps.core.middleware.DisableApiResponseCachingMiddleware",
+    "apps.kernel.core.middleware.DisableApiResponseCachingMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     # Before CommonMiddleware: restore trailing slash stripped by Next.js proxy.
-    "apps.core.middleware.ForceApiTrailingSlashMiddleware",
+    "apps.kernel.core.middleware.ForceApiTrailingSlashMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "apps.kernel.tenancy.middleware.LegacyCapabilityMiddleware",
+    "apps.kernel.tenancy.pause.WritePauseMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -135,6 +144,7 @@ STORAGES = {
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"
 
 # ---------------------------------------------------------------------------
 # Django REST Framework
@@ -142,7 +152,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "apps.accounts.authentication.CookieJWTAuthentication",
+        "apps.kernel.accounts.authentication.CookieJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -199,6 +209,19 @@ CORS_ALLOW_HEADERS = (
 
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
+# Neutral hosts may call /institutes/<slug>/ with ordinary membership checks.
+# testserver is the Django test client. Production sets this list explicitly
+# and must not use a wildcard CORS or CSRF trust when a domain is added.
+TENANCY_NEUTRAL_HOSTS = env.list(
+    "TENANCY_NEUTRAL_HOSTS",
+    default=["localhost", "127.0.0.1", "testserver"],
+)
+TENANCY_WRITE_PAUSE = env.list("TENANCY_WRITE_PAUSE", default=[])
+
+# Compatibility release: registration that omits an institute still joins psy,
+# and the membership service writes the legacy psy_* group. Phase 7 removes this.
+TENANCY_COMPAT_REGISTER_INSTITUTE = env("TENANCY_COMPAT_REGISTER_INSTITUTE", default="psy")
+
 # ---------------------------------------------------------------------------
 # Finance
 # ---------------------------------------------------------------------------
@@ -218,6 +241,8 @@ VANDAR_API_KEY = env("VANDAR_API_KEY", default="")
 VANDAR_CALLBACK_URL = env("VANDAR_CALLBACK_URL", default="")
 VANDAR_FRONTEND_SUCCESS_URL = env("VANDAR_FRONTEND_SUCCESS_URL", default="")
 VANDAR_FRONTEND_FAILURE_URL = env("VANDAR_FRONTEND_FAILURE_URL", default="")
+# Shared frontend used when an institute has no canonical domain.
+PLATFORM_FRONTEND_ORIGIN = env("PLATFORM_FRONTEND_ORIGIN", default="")
 VANDAR_SEND_URL = env(
     "VANDAR_SEND_URL",
     default="https://ipg.vandar.io/api/v4/send",

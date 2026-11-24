@@ -1,7 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from . import admin_api, schedule_admin, shop_api, views
+from . import admin_api, module_adapters, schedule_admin, views
 
 app_name = "psy_institute"
 
@@ -53,16 +53,16 @@ router.register(
     views.PsychometricResponseViewSet,
     basename="psychometric-response",
 )
-router.register("workshops", views.WorkshopViewSet, basename="workshop")
+router.register("workshops", module_adapters.PsyWorkshopViewSet, basename="workshop")
 router.register(
-    "shop/categories", shop_api.ProductCategoryViewSet, basename="shop-category"
+    "shop/categories", module_adapters.PsyProductCategoryViewSet, basename="shop-category"
 )
-router.register("shop/products", shop_api.ProductViewSet, basename="shop-product")
-router.register("shop/coupons", shop_api.CouponViewSet, basename="shop-coupon")
-router.register("shop/orders", shop_api.ShopOrderViewSet, basename="shop-order")
-router.register("blog", views.BlogPostViewSet, basename="blog")
-router.register("news", views.NewsSlideViewSet, basename="news")
-router.register("pages", views.SitePageViewSet, basename="page")
+router.register("shop/products", module_adapters.PsyProductViewSet, basename="shop-product")
+router.register("shop/coupons", module_adapters.PsyCouponViewSet, basename="shop-coupon")
+router.register("shop/orders", module_adapters.PsyShopOrderViewSet, basename="shop-order")
+router.register("blog", module_adapters.PsyBlogPostViewSet, basename="blog")
+router.register("news", module_adapters.PsyNewsSlideViewSet, basename="news")
+router.register("pages", module_adapters.PsySitePageViewSet, basename="page")
 router.register("tickets", views.TicketViewSet, basename="ticket")
 
 urlpatterns = [
@@ -169,54 +169,50 @@ urlpatterns = [
         admin_api.AdminFinanceAppointmentRevenueView.as_view(),
         name="admin-finance-appointment-revenue",
     ),
-    path(
-        "shop/cart/",
-        shop_api.CartView.as_view(),
-        name="shop-cart",
-    ),
+    path("shop/cart/", module_adapters.PsyCartView.as_view(), name="shop-cart"),
     path(
         "shop/cart/items/",
-        shop_api.CartItemListView.as_view(),
+        module_adapters.PsyCartItemListView.as_view(),
         name="shop-cart-items",
     ),
     path(
         "shop/cart/items/<int:pk>/",
-        shop_api.CartItemDetailView.as_view(),
+        module_adapters.PsyCartItemDetailView.as_view(),
         name="shop-cart-item",
     ),
     path(
         "shop/cart/coupon/",
-        shop_api.CartCouponView.as_view(),
+        module_adapters.PsyCartCouponView.as_view(),
         name="shop-cart-coupon",
     ),
     path(
         "admin/shop/orders/",
-        admin_api.AdminShopOrderListView.as_view(),
+        module_adapters.PsyAdminShopOrderListView.as_view(),
         name="admin-shop-orders",
     ),
     path(
         "admin/shop/orders/<int:pk>/",
-        admin_api.AdminShopOrderDetailView.as_view(),
+        module_adapters.PsyAdminShopOrderDetailView.as_view(),
         name="admin-shop-order",
     ),
     path(
         "admin/shop/orders/<int:pk>/refund/",
-        admin_api.AdminShopOrderRefundView.as_view(),
+        module_adapters.PsyAdminShopOrderRefundView.as_view(),
         name="admin-shop-order-refund",
     ),
     path(
         "admin/shop/stats/",
-        admin_api.AdminShopStatsView.as_view(),
+        module_adapters.PsyAdminShopStatsView.as_view(),
         name="admin-shop-stats",
     ),
     path(
         "patient/workshop-enrollments/",
-        views.PatientWorkshopEnrollmentView.as_view(),
+        module_adapters.PsyPatientEnrollmentView.as_view(),
         name="patient-workshop-enrollments",
     ),
     path(
         "therapist/workshops/",
-        views.TherapistWorkshopListView.as_view(),
+        module_adapters.PsyTeachingCourseListView.as_view(),
         name="therapist-workshop-list",
     ),
     path(
@@ -246,22 +242,22 @@ urlpatterns = [
     ),
     path(
         "workshops/<slug:workshop_slug>/sessions/",
-        views.WorkshopSessionListCreateView.as_view(),
+        module_adapters.PsyWorkshopSessionListCreateView.as_view(),
         name="workshop-session-list",
     ),
     path(
         "workshops/<slug:workshop_slug>/sessions/<int:pk>/",
-        views.WorkshopSessionDetailView.as_view(),
+        module_adapters.PsyWorkshopSessionDetailView.as_view(),
         name="workshop-session-detail",
     ),
     path(
         "workshops/<slug:workshop_slug>/resources/",
-        views.WorkshopResourceListCreateView.as_view(),
+        module_adapters.PsyWorkshopResourceListCreateView.as_view(),
         name="workshop-resource-list",
     ),
     path(
         "workshops/<slug:workshop_slug>/resources/<int:pk>/",
-        views.WorkshopResourceDetailView.as_view(),
+        module_adapters.PsyWorkshopResourceDetailView.as_view(),
         name="workshop-resource-detail",
     ),
     *router.urls,

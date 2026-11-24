@@ -14,7 +14,9 @@ from django.db.models import Count, Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from ..models import Appointment, AppointmentSlot, TherapistProfile
+from apps.modules.booking.models import Appointment, AppointmentSlot
+
+from ..models import TherapistProfile
 
 # Paid, non-canceled states that count toward therapist earnings.
 # pending_payment, canceled_*, and no_show are excluded.

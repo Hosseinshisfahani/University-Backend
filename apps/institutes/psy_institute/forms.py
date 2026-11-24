@@ -123,4 +123,4 @@ class TherapistProfileAdminForm(forms.ModelForm):
 
     class Meta:
         model = models.TherapistProfile
-        fields = "__all__"
+        exclude = ("institute",)

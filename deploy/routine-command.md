@@ -28,12 +28,18 @@ Wait until **Django check** and **Push GHCR image** are green. Ignore a red **Pu
 
 ## Backend (VPS — you pull)
 
+The container does not migrate on startup. Apply migrations as their own release step, once, before replacing the running app:
+
 ```bash
 cd /var/www/university
 docker compose --env-file compose.env -f docker-compose.prod.yml pull backend
+docker compose --env-file compose.env -f docker-compose.prod.yml run --rm --no-deps backend \
+  python manage.py migrate --noinput
 docker compose --env-file compose.env -f docker-compose.prod.yml up -d backend
 docker compose --env-file compose.env -f docker-compose.prod.yml logs --tail 40 backend
 ```
+
+`RUN_MIGRATIONS=1` is only for a local stack that should migrate itself. Leave it unset in production.
 
 If pull fails with `lookup ghcr.io ... server misbehaving`, fix VPS DNS, then retry.
 

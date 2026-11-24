@@ -34,6 +34,9 @@ server {
         add_header Pragma "no-cache" always;
         add_header CDN-Cache-Control "no-store" always;
     }
+    location ~ ^/media/(psy/shop/files/|psy/certificates/|shop/[^/]+/files/|lms/[^/]+/(files|certificates)/) {
+        return 404;
+    }
     location /media/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;

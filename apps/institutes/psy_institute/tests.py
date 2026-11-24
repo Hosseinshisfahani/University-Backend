@@ -2,7 +2,7 @@
 Psychology institute tests.
 
 Overlap (GiST) and full booking flows require PostgreSQL.
-Ledger/wallet unit tests live in apps.finance.tests (SQLite-safe).
+Ledger/wallet unit tests live in apps.kernel.finance.tests (SQLite-safe).
 """
 
 from datetime import time, timedelta
@@ -10,6 +10,8 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from apps.kernel.tenancy.models import Institute
+from apps.kernel.tenancy.services import grant_psy_role
 from django.core.files.base import ContentFile
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
@@ -18,17 +20,23 @@ from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from apps.institutes.psy_institute.services.finance import therapist_finance_report
 from apps.institutes.psy_institute.views import TherapistFinanceView
-from apps.institutes.psy_institute.models import (
+from apps.modules.lms.models import Course as Workshop
+from apps.modules.lms.models import CourseResource as WorkshopResource
+from apps.modules.lms.models import CourseSession as WorkshopSession
+from apps.modules.lms.models import Enrollment as WorkshopEnrollment
+from apps.modules.booking.models import (
     Appointment,
     AppointmentSlot,
     AvailabilityException,
-    FileAccessRequest,
-    PatientProfile,
+    LeaveRequest,
     SessionType,
     TherapistAvailability,
-    TherapistProfile,
     TherapistSessionOffer,
-    Workshop,
+)
+from apps.institutes.psy_institute.models import (
+    FileAccessRequest,
+    PatientProfile,
+    TherapistProfile,
 )
 
 User = get_user_model()
@@ -41,8 +49,8 @@ class ProfileSmokeTests(TestCase):
 
         therapist_user = User.objects.create_user(username="th1", password="x")
         patient_user = User.objects.create_user(username="pt1", password="x")
-        therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
-        patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(therapist_user, "staff")
+        grant_psy_role(patient_user, "member", provision_profile=False)
 
         TherapistProfile.objects.create(user=therapist_user, display_name="Dr. A")
         PatientProfile.objects.create(user=patient_user, phone="09120000000")
@@ -172,8 +180,8 @@ class TherapistPortalApiTests(TestCase):
         self.patient_user = User.objects.create_user(
             username="patient_api", password="Pass1234!", first_name="Ali"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.therapist_user, "staff")
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr. Test"
@@ -182,6 +190,7 @@ class TherapistPortalApiTests(TestCase):
             user=self.patient_user, phone="09121110000"
         )
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="Online 45",
             slug="online-45-test",
             modality=SessionType.Modality.ONLINE,
@@ -270,10 +279,10 @@ class TherapistFinanceApiTests(TestCase):
         self.admin_user = User.objects.create_user(
             username="ad_finance", password="Pass1234!"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
-        self.other_user.groups.add(Group.objects.get(name="psy_therapist"))
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
-        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.therapist_user, "staff")
+        grant_psy_role(self.other_user, "staff")
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
+        grant_psy_role(self.admin_user, "admin")
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr. Finance"
@@ -285,6 +294,7 @@ class TherapistFinanceApiTests(TestCase):
             user=self.patient_user, phone="09120001111"
         )
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="In person 50",
             slug="in-person-50-finance",
             modality=SessionType.Modality.IN_PERSON,
@@ -458,16 +468,16 @@ class AdminPortalApiTests(TestCase):
         self.admin_user = User.objects.create_user(
             username="admin_api", password="Pass1234!"
         )
-        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin_user, "admin")
 
         self.therapist_user = User.objects.create_user(
             username="th_admin", password="Pass1234!"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
         self.patient_user = User.objects.create_user(
             username="pt_admin", password="Pass1234!", first_name="Sara"
         )
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr. Admin Test"
@@ -476,6 +486,7 @@ class AdminPortalApiTests(TestCase):
             user=self.patient_user, phone="09123334444"
         )
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="Online 45",
             slug="online-45-admin",
             modality=SessionType.Modality.ONLINE,
@@ -512,7 +523,7 @@ class AdminPortalApiTests(TestCase):
         patients = self.client.get(reverse("psy_institute:admin-patient-list"))
         self.assertEqual(patients.status_code, 200)
         self.assertGreaterEqual(patients.json()["count"], 1)
-        self.assertIn("wallet_balance", patients.json()["results"][0])
+        self.assertNotIn("wallet_balance", patients.json()["results"][0])
 
         detail = self.client.get(
             reverse(
@@ -600,11 +611,11 @@ class WorkshopEnrollmentFlowTests(TestCase):
             Group.objects.get_or_create(name=name)
 
         self.admin = User.objects.create_user(username="ws_admin", password="x")
-        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin, "admin")
         self.therapist_user = User.objects.create_user(username="ws_th", password="x")
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
         self.patient_user = User.objects.create_user(username="ws_pt", password="x")
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr WS"
@@ -612,11 +623,15 @@ class WorkshopEnrollmentFlowTests(TestCase):
         self.patient = PatientProfile.objects.create(
             user=self.patient_user, phone="09120001111"
         )
+        from apps.kernel.tenancy.models import Institute
+
+        psy = Institute.objects.get(slug="psy")
         self.workshop = Workshop.objects.create(
+            institute=psy,
             title="Paid WS",
             slug="paid-ws",
             description="test",
-            instructor=self.therapist,
+            instructor=self.therapist.user,
             capacity=2,
             price=Decimal("100000"),
             starts_at=timezone.now() + timedelta(days=5),
@@ -624,16 +639,17 @@ class WorkshopEnrollmentFlowTests(TestCase):
             is_published=True,
         )
         self.free = Workshop.objects.create(
+            institute=psy,
             title="Free WS",
             slug="free-ws",
-            instructor=self.therapist,
+            instructor=self.therapist.user,
             capacity=10,
             price=Decimal("0"),
             starts_at=timezone.now() + timedelta(days=3),
             is_published=True,
         )
-        from apps.finance import services as finance_services
-        from apps.finance.models import LedgerEntry
+        from apps.kernel.finance import services as finance_services
+        from apps.kernel.finance.models import LedgerEntry
 
         finance_services.credit_wallet(
             user=self.patient_user,
@@ -708,11 +724,11 @@ class WorkshopLmsGatingTests(TestCase):
             Group.objects.get_or_create(name=name)
 
         self.patient_user = User.objects.create_user(username="lms_pt", password="x")
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
         self.other_user = User.objects.create_user(username="lms_pt2", password="x")
-        self.other_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.other_user, "member", provision_profile=False)
         self.therapist_user = User.objects.create_user(username="lms_th", password="x")
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr LMS"
@@ -722,24 +738,22 @@ class WorkshopLmsGatingTests(TestCase):
         )
         PatientProfile.objects.create(user=self.other_user, phone="09120003333")
 
+        from apps.kernel.tenancy.models import Institute
+
+        psy = Institute.objects.get(slug="psy")
         self.workshop = Workshop.objects.create(
+            institute=psy,
             title="LMS WS",
             slug="lms-ws",
             description="short",
             body_md="## Intro\n\nHello",
-            instructor=self.therapist,
+            instructor=self.therapist.user,
             capacity=10,
             price=Decimal("0"),
             starts_at=timezone.now() + timedelta(days=2),
             is_published=True,
             certificate_enabled=True,
         )
-        from apps.institutes.psy_institute.models import (
-            WorkshopEnrollment,
-            WorkshopResource,
-            WorkshopSession,
-        )
-
         self.session1 = WorkshopSession.objects.create(
             workshop=self.workshop,
             sort_order=1,
@@ -772,7 +786,7 @@ class WorkshopLmsGatingTests(TestCase):
         )
         self.enrollment = WorkshopEnrollment.objects.create(
             workshop=self.workshop,
-            patient=self.patient,
+            user=self.patient.user,
             status=WorkshopEnrollment.Status.ACTIVE,
             price_snapshot=Decimal("0"),
             payment_ref="free",
@@ -854,21 +868,24 @@ class BlogPostApiTests(TestCase):
             Group.objects.get_or_create(name=name)
 
         self.admin = User.objects.create_user(username="blog_admin", password="x")
-        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin, "admin")
         self.admin.is_staff = True
         self.admin.save()
 
         self.therapist_user = User.objects.create_user(
             username="blog_th", password="x", first_name="سارا", last_name="احمدی"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="سارا احمدی"
         )
 
-        from apps.institutes.psy_institute.models import BlogPost
+        from apps.modules.content.models import Post
+        from apps.kernel.tenancy.models import Institute
 
-        self.published = BlogPost.objects.create(
+        psy = Institute.objects.get(slug="psy")
+        self.published = Post.objects.create(
+            institute=psy,
             title="Published Post",
             slug="published-post",
             excerpt="ex",
@@ -877,7 +894,8 @@ class BlogPostApiTests(TestCase):
             published_at=timezone.now(),
             author=self.therapist_user,
         )
-        self.draft = BlogPost.objects.create(
+        self.draft = Post.objects.create(
+            institute=psy,
             title="Draft Post",
             slug="draft-post",
             body="secret",
@@ -930,13 +948,16 @@ class NewsSlideApiTests(TestCase):
             Group.objects.get_or_create(name=name)
 
         self.admin = User.objects.create_user(username="news_admin", password="x")
-        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin, "admin")
         self.admin.is_staff = True
         self.admin.save()
 
-        from apps.institutes.psy_institute.models import NewsSlide
+        from apps.modules.content.models import NewsSlide
+        from apps.kernel.tenancy.models import Institute
 
+        psy = Institute.objects.get(slug="psy")
         self.published = NewsSlide.objects.create(
+            institute=psy,
             title="Published Slide",
             body="Welcome to the center",
             link_url="/psy/blog/published-post",
@@ -945,6 +966,7 @@ class NewsSlideApiTests(TestCase):
             is_published=True,
         )
         self.draft = NewsSlide.objects.create(
+            institute=psy,
             title="Draft Slide",
             body="secret",
             sort_order=0,
@@ -1018,15 +1040,15 @@ class AdminCentricSchedulingTests(TestCase):
         self.admin_user = User.objects.create_user(
             username="sched_admin", password="Pass1234!"
         )
-        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin_user, "admin")
         self.therapist_user = User.objects.create_user(
             username="sched_th", password="Pass1234!"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
         self.patient_user = User.objects.create_user(
             username="sched_pt", password="Pass1234!", first_name="Neda"
         )
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr Schedule"
@@ -1035,6 +1057,7 @@ class AdminCentricSchedulingTests(TestCase):
             user=self.patient_user, phone="09125550000"
         )
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="Online 45",
             slug="online-45-sched",
             modality=SessionType.Modality.ONLINE,
@@ -1131,8 +1154,8 @@ class AdminCentricSchedulingTests(TestCase):
         self.assertEqual(resp.status_code, 409)
 
     def test_admin_book_pending_wallet_and_offline(self):
-        from apps.finance import services as finance_services
-        from apps.finance.models import LedgerEntry, Wallet
+        from apps.kernel.finance import services as finance_services
+        from apps.kernel.finance.models import LedgerEntry, Wallet
 
         wallet_slot = AppointmentSlot.objects.create(
             therapist=self.therapist,
@@ -1206,8 +1229,8 @@ class AdminCentricSchedulingTests(TestCase):
         self.assertEqual(wallet.balance, before - Decimal("200000"))
 
     def test_patient_book_confirm_cancel_still_works(self):
-        from apps.finance import services as finance_services
-        from apps.finance.models import LedgerEntry, Wallet
+        from apps.kernel.finance import services as finance_services
+        from apps.kernel.finance.models import LedgerEntry, Wallet
 
         finance_services.credit_wallet(
             user=self.patient_user,
@@ -1377,6 +1400,7 @@ class AdminCentricSchedulingTests(TestCase):
 
     def test_patient_book_requires_offered_session_type(self):
         other_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="Clinical 60",
             slug="clinical-60-sched",
             modality=SessionType.Modality.IN_PERSON,
@@ -1489,19 +1513,19 @@ class TherapistReviewApiTests(TestCase):
         self.admin_user = User.objects.create_user(
             username="review_admin", password="Pass1234!"
         )
-        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin_user, "admin")
         self.therapist_user = User.objects.create_user(
             username="review_th", password="Pass1234!"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
+        grant_psy_role(self.therapist_user, "staff")
         self.patient_user = User.objects.create_user(
             username="review_pt", password="Pass1234!", first_name="سارا"
         )
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
         self.other_patient_user = User.objects.create_user(
             username="review_pt2", password="Pass1234!", first_name="رضا"
         )
-        self.other_patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.other_patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user,
@@ -1512,6 +1536,7 @@ class TherapistReviewApiTests(TestCase):
         self.patient = PatientProfile.objects.create(user=self.patient_user)
         self.other_patient = PatientProfile.objects.create(user=self.other_patient_user)
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="Review 45",
             slug="review-45",
             modality=SessionType.Modality.ONLINE,
@@ -1688,7 +1713,7 @@ class ClinicalRecordsApiTests(TestCase):
         self.admin_user = User.objects.create_user(
             username="ehr_admin", password="Pass1234!", is_staff=True
         )
-        self.admin_user.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin_user, "admin")
         self.therapist_user = User.objects.create_user(
             username="ehr_th1", password="Pass1234!", first_name="Sara"
         )
@@ -1698,9 +1723,9 @@ class ClinicalRecordsApiTests(TestCase):
         self.patient_user = User.objects.create_user(
             username="ehr_pt", password="Pass1234!", first_name="Ali"
         )
-        self.therapist_user.groups.add(Group.objects.get(name="psy_therapist"))
-        self.other_th_user.groups.add(Group.objects.get(name="psy_therapist"))
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.therapist_user, "staff")
+        grant_psy_role(self.other_th_user, "staff")
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
 
         self.therapist = TherapistProfile.objects.create(
             user=self.therapist_user, display_name="Dr. Sara"
@@ -1710,6 +1735,7 @@ class ClinicalRecordsApiTests(TestCase):
         )
         self.patient = PatientProfile.objects.create(user=self.patient_user)
         self.session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="EHR 45",
             slug="ehr-45",
             modality=SessionType.Modality.ONLINE,
@@ -1877,6 +1903,9 @@ class ClinicalRecordsApiTests(TestCase):
         self.assertTrue(after["has_full_file_access"])
         self.assertEqual(len(after["clinical_reports"]), 2)
 
+        row = FileAccessRequest.objects.get(pk=req_id)
+        row.expires_at = timezone.now() - timedelta(seconds=1)
+        row.save(update_fields=["expires_at"])
         expired_view = self.client.get(detail_url).json()
         self.assertFalse(expired_view["has_full_file_access"])
         self.assertEqual(len(expired_view["clinical_reports"]), 1)
@@ -1903,6 +1932,7 @@ class AppointmentSmsTests(TestCase):
             user=patient_user, phone="09123334455"
         )
         session_type = SessionType.objects.create(
+            institute_id=Institute.objects.get(slug="psy").pk,
             name="SMS session",
             slug="sms-session",
             modality=SessionType.Modality.ONLINE,
@@ -1935,7 +1965,7 @@ class AppointmentSmsTests(TestCase):
 
     def test_confirmed_sends_two_sms(self):
         from apps.institutes.psy_institute.services.notify import notify_appointment
-        from apps.notifications.models import SmsMessage
+        from apps.kernel.notifications.models import SmsMessage
 
         notify_appointment(self._loaded(), "confirmed")
         rows = SmsMessage.objects.filter(purpose=SmsMessage.Purpose.APPOINTMENT)
@@ -1956,7 +1986,7 @@ class AppointmentSmsTests(TestCase):
 
     def test_empty_phones_do_not_raise(self):
         from apps.institutes.psy_institute.services.notify import notify_appointment
-        from apps.notifications.models import SmsMessage
+        from apps.kernel.notifications.models import SmsMessage
 
         self.patient.user.phone = ""
         self.patient.user.save(update_fields=["phone"])
@@ -1975,25 +2005,29 @@ class AppointmentSmsTests(TestCase):
 
 class ShopFlowTests(TestCase):
     def setUp(self):
-        from apps.finance import services as finance_services
-        from apps.finance.models import LedgerEntry
-        from apps.institutes.psy_institute.models import Product, ProductCategory
+        from apps.kernel.finance import services as finance_services
+        from apps.kernel.finance.models import LedgerEntry
+        from apps.modules.shop.models import Product, ProductCategory
+        from apps.kernel.tenancy.models import Institute
+
+        psy = Institute.objects.get(slug="psy")
 
         for name in ("psy_admin", "psy_therapist", "psy_patient"):
             Group.objects.get_or_create(name=name)
         self.admin = User.objects.create_user(username="shop_admin", password="x")
-        self.admin.groups.add(Group.objects.get(name="psy_admin"))
+        grant_psy_role(self.admin, "admin")
         self.patient_user = User.objects.create_user(
             username="shop_pt", password="x", first_name="نسترن"
         )
-        self.patient_user.groups.add(Group.objects.get(name="psy_patient"))
+        grant_psy_role(self.patient_user, "member", provision_profile=False)
         self.patient = PatientProfile.objects.create(
             user=self.patient_user, phone="09120002222"
         )
         self.books = ProductCategory.objects.create(
-            name="کتاب", slug="books", is_active=True
+            institute=psy, name="کتاب", slug="books", is_active=True
         )
         self.book = Product.objects.create(
+            institute=psy,
             title="کتاب اضطراب",
             slug="anxiety-book",
             category=self.books,
@@ -2004,6 +2038,7 @@ class ShopFlowTests(TestCase):
             is_available=True,
         )
         self.audio = Product.objects.create(
+            institute=psy,
             title="فایل آرام‌سازی",
             slug="calm-audio",
             category=self.books,
@@ -2014,6 +2049,7 @@ class ShopFlowTests(TestCase):
         )
         self.audio.digital_file.save("calm.txt", ContentFile(b"relax"), save=True)
         self.hidden = Product.objects.create(
+            institute=psy,
             title="پنهان",
             slug="hidden-item",
             kind=Product.Kind.PHYSICAL,
@@ -2069,7 +2105,7 @@ class ShopFlowTests(TestCase):
         self.assertIn("hidden-item", admin_slugs)
 
     def test_wallet_checkout_and_patient_cancel_refunds(self):
-        from apps.finance import services as finance_services
+        from apps.kernel.finance import services as finance_services
 
         self.client.force_authenticate(self.patient_user)
         added = self._add("anxiety-book", 2)
@@ -2099,7 +2135,7 @@ class ShopFlowTests(TestCase):
         )
 
     def test_insufficient_funds(self):
-        from apps.finance.models import Wallet
+        from apps.kernel.finance.models import Wallet
 
         Wallet.objects.filter(user=self.patient_user).update(balance=Decimal("1000"))
         self.client.force_authenticate(self.patient_user)
@@ -2110,21 +2146,26 @@ class ShopFlowTests(TestCase):
         self.assertEqual(paid.json()["code"], "insufficient_funds")
 
     def test_coupon_rules(self):
-        from apps.institutes.psy_institute.models import Coupon
+        from apps.modules.shop.models import Coupon
+        from apps.kernel.tenancy.models import Institute
 
+        psy = Institute.objects.get(slug="psy")
         expired = Coupon.objects.create(
+            institute=psy,
             code="OLD",
             kind=Coupon.Kind.PERCENT,
             value=Decimal("10"),
             ends_at=timezone.now() - timedelta(days=1),
         )
         minimum = Coupon.objects.create(
+            institute=psy,
             code="BIG",
             kind=Coupon.Kind.FIXED,
             value=Decimal("1000"),
             min_order_total=Decimal("999999999"),
         )
         once = Coupon.objects.create(
+            institute=psy,
             code="ONCE",
             kind=Coupon.Kind.PERCENT,
             value=Decimal("10"),
@@ -2185,8 +2226,8 @@ class ShopFlowTests(TestCase):
         self.assertIn(b"relax", b"".join(allowed.streaming_content))
 
     def test_gateway_deposit_marks_order_paid(self):
-        from apps.finance import services as finance_services
-        from apps.finance.models import Wallet
+        from apps.kernel.finance import services as finance_services
+        from apps.kernel.finance.models import Wallet
 
         Wallet.objects.filter(user=self.patient_user).update(balance=Decimal("0"))
         self.client.force_authenticate(self.patient_user)
@@ -2209,7 +2250,7 @@ class ShopFlowTests(TestCase):
         )
 
     def test_admin_ships_physical_and_fulfills_digital(self):
-        from apps.institutes.psy_institute.models import Product
+        from apps.modules.shop.models import Product
 
         self.client.force_authenticate(self.patient_user)
         self._add("anxiety-book")

@@ -15,8 +15,19 @@ while ! python -c "import os, psycopg; psycopg.connect(os.environ['DATABASE_URL'
   echo "Postgres is unavailable - sleeping"
   sleep 2
 done
-echo "Running migrations..."
-python manage.py migrate --noinput
+
+# `docker compose run backend python manage.py migrate` must run the command
+# instead of starting the server. Startup does not migrate unless asked.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
+if [ "${RUN_MIGRATIONS:-0}" = "1" ]; then
+  echo "Running migrations..."
+  python manage.py migrate --noinput
+else
+  echo "Skipping migrations. Run: python manage.py migrate --noinput"
+fi
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 echo "Starting Gunicorn..."

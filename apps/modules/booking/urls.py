@@ -1,0 +1,35 @@
+from django.urls import path
+
+from . import views
+
+urlpatterns = [
+    path("service-types/", views.ServiceTypeListView.as_view()),
+    path("service-types/<slug:slug>/", views.ServiceTypeDetailView.as_view()),
+    path("session-types/", views.ServiceTypeListView.as_view()),
+    path("session-types/<slug:slug>/", views.ServiceTypeDetailView.as_view()),
+    path("providers/", views.ProviderListView.as_view()),
+    path("providers/me/reviews/", views.MyReviewListView.as_view()),
+    path("providers/<int:pk>/", views.ProviderDetailView.as_view()),
+    path("providers/<int:pk>/slots/", views.ProviderSlotListView.as_view()),
+    path("providers/<int:pk>/reviews/", views.ProviderReviewListView.as_view()),
+    path("providers/<int:pk>/availability/", views.AvailabilityListView.as_view()),
+    path("providers/<int:pk>/availability/<int:availability_id>/", views.AvailabilityDetailView.as_view()),
+    path("providers/<int:pk>/offers/", views.OfferListView.as_view()),
+    path("providers/<int:pk>/offers/<int:offer_id>/", views.OfferDetailView.as_view()),
+    path("providers/<int:pk>/exceptions/", views.ExceptionListView.as_view()),
+    path("providers/<int:pk>/exceptions/<int:exception_id>/", views.ExceptionDetailView.as_view()),
+    path("therapists/", views.ProviderListView.as_view()),
+    path("therapists/<int:pk>/", views.ProviderDetailView.as_view()),
+    path("therapists/<int:pk>/slots/", views.ProviderSlotListView.as_view()),
+    path("therapist/availability/", views._ScheduleDisabled.as_view()),
+    path("therapist/exceptions/", views._ScheduleDisabled.as_view()),
+    path("therapist/session-offers/", views._ScheduleDisabled.as_view()),
+    path("slots/", views.SlotListCreateView.as_view()),
+    path("slots/<int:pk>/", views.SlotDetailView.as_view()),
+    path("slots/regenerate/", views.RegenerateSlotsView.as_view()),
+    path("leave-requests/", views.LeaveListCreateView.as_view()),
+    path("leave-requests/<int:pk>/<str:action>/", views.LeaveActionView.as_view()),
+    path("appointments/", views.AppointmentListCreateView.as_view()),
+    path("appointments/<int:pk>/", views.AppointmentDetailView.as_view()),
+    path("appointments/<int:pk>/<str:action>/", views.AppointmentDetailView.as_view()),
+]

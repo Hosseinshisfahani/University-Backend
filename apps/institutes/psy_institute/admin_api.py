@@ -15,24 +15,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.finance.models import LedgerEntry, Payment, Wallet
-
+from apps.kernel.finance.models import LedgerEntry, Payment
 from . import services
-from .models import (
+from apps.modules.booking.models import (
     Appointment,
     AppointmentSlot,
-    ClinicalReport,
-    Order,
-    OrderItem,
-    PatientProfile,
-    PsychometricResponse,
     TherapistAvailability,
-    TherapistProfile,
-    TherapistReview,
     TherapistSessionOffer,
 )
+from .models import ClinicalReport, PatientProfile, TherapistProfile
 from .permissions import IsPsyAdmin
-from .shop_api import ShopOrderSerializer
 from .serializers import (
     AdminTherapistReviewSerializer,
     AppointmentSerializer,
@@ -98,11 +90,16 @@ class AdminOverviewView(APIView):
         ).count()
         patients_count = PatientProfile.objects.count()
         therapists_active = TherapistProfile.objects.filter(is_active=True).count()
-        pending_reviews = TherapistReview.objects.filter(
-            text_status=TherapistReview.TextStatus.PENDING
+        from apps.modules.reviews.models import Review
+
+        pending_reviews = Review.objects.filter(
+            institute__slug="psy",
+            text_status=Review.TextStatus.PENDING,
         ).count()
 
-        ledger_week = LedgerEntry.objects.filter(created_at__gte=week_ago)
+        ledger_week = LedgerEntry.objects.filter(
+            created_at__gte=week_ago, institute__slug="psy"
+        )
         capture = ledger_week.filter(
             entry_type=LedgerEntry.EntryType.APPOINTMENT_CAPTURE
         ).aggregate(total=Coalesce(Sum("amount"), Decimal("0")))["total"]
@@ -152,7 +149,6 @@ class AdminPatientListView(APIView):
         for patient in items:
             appts = Appointment.objects.filter(patient=patient).order_by("-starts_at")
             last = appts.first()
-            wallet = Wallet.objects.filter(user=patient.user).first()
             results.append(
                 {
                     "id": patient.id,
@@ -164,7 +160,6 @@ class AdminPatientListView(APIView):
                     "appointments_count": appts.count(),
                     "last_appointment_at": last.starts_at if last else None,
                     "last_appointment_status": last.status if last else None,
-                    "wallet_balance": str(wallet.balance) if wallet else "0",
                 }
             )
         return Response(
@@ -190,18 +185,19 @@ class AdminPatientDetailView(APIView):
             .order_by("-starts_at")
         )
         last = appts.first()
-        wallet = Wallet.objects.filter(user=patient.user).first()
         recent_appts = appts[:10]
+        from apps.modules.forms.models import Response as FormResponse
+
         recent_responses = (
-            PsychometricResponse.objects.filter(patient=patient)
-            .select_related("form", "patient", "patient__user", "routed_therapist")
+            FormResponse.objects.filter(respondent=patient.user, institute__slug="psy")
+            .select_related("form", "respondent", "version")
             .order_by("-submitted_at")[:10]
         )
         clinical_reports = (
             ClinicalReport.objects.filter(patient=patient)
             .select_related(
                 "appointment",
-                "appointment__session_type",
+                "appointment__service_type",
                 "therapist",
                 "patient__user",
             )
@@ -221,7 +217,6 @@ class AdminPatientDetailView(APIView):
                 "appointments_count": appts.count(),
                 "last_appointment_at": last.starts_at if last else None,
                 "last_appointment_status": last.status if last else None,
-                "wallet_balance": str(wallet.balance) if wallet else "0",
                 "recent_appointments": AppointmentSerializer(
                     recent_appts, many=True
                 ).data,
@@ -328,10 +323,12 @@ class AdminFinanceSummaryView(APIView):
     def get(self, request):
         date_from, date_to = _parse_range(request)
         ledger = LedgerEntry.objects.filter(
+            institute__slug="psy",
             created_at__date__gte=date_from,
             created_at__date__lte=date_to,
         )
         gateway = Payment.objects.filter(
+            institute__slug="psy",
             status=Payment.Status.SUCCEEDED,
             provider__in=[Payment.Provider.SEP, Payment.Provider.VANDAR],
             created_at__date__gte=date_from,
@@ -370,7 +367,9 @@ class AdminFinanceLedgerView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request):
-        qs = LedgerEntry.objects.select_related("wallet__user").order_by("-created_at")
+        qs = LedgerEntry.objects.filter(institute__slug="psy").select_related(
+            "wallet__user"
+        ).order_by("-created_at")
         entry_type = request.query_params.get("entry_type")
         username = request.query_params.get("user")
         date_from = request.query_params.get("from")
@@ -392,7 +391,6 @@ class AdminFinanceLedgerView(APIView):
                 "wallet_id": e.wallet_id,
                 "direction": e.direction,
                 "amount": str(e.amount),
-                "balance_after": str(e.balance_after),
                 "entry_type": e.entry_type,
                 "reference": e.reference,
                 "description": e.description,
@@ -414,7 +412,9 @@ class AdminFinancePaymentsView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request):
-        qs = Payment.objects.select_related("user").order_by("-created_at")
+        qs = Payment.objects.filter(institute__slug="psy").select_related("user").order_by(
+            "-created_at"
+        )
         status_param = request.query_params.get("status")
         provider = request.query_params.get("provider")
         date_from = request.query_params.get("from")
@@ -460,6 +460,7 @@ class AdminFinanceAppointmentRevenueView(APIView):
     def get(self, request):
         qs = (
             LedgerEntry.objects.filter(
+                institute__slug="psy",
                 entry_type__in=[
                     LedgerEntry.EntryType.APPOINTMENT_CAPTURE,
                     LedgerEntry.EntryType.REFUND,
@@ -482,9 +483,13 @@ class AdminFinanceAppointmentRevenueView(APIView):
         results = []
         for e in items:
             appt_id = None
-            if e.reference.startswith("psy.appointment:"):
+            prefix = next(
+                (item for item in ("booking.appointment:", "psy.appointment:") if e.reference.startswith(item)),
+                "",
+            )
+            if prefix:
                 try:
-                    appt_id = int(e.reference.split(":", 1)[1])
+                    appt_id = int(e.reference[len(prefix):])
                 except (IndexError, ValueError):
                     appt_id = None
             results.append(
@@ -513,15 +518,17 @@ class AdminReviewListView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request):
-        qs = TherapistReview.objects.select_related(
-            "patient__user", "therapist", "appointment"
+        from apps.modules.reviews.models import Review
+
+        qs = Review.objects.filter(institute__slug="psy").select_related(
+            "psy_context__patient__user", "psy_context__appointment"
         ).order_by("-created_at")
         status_param = request.query_params.get("status")
         therapist = request.query_params.get("therapist")
         if status_param:
             qs = qs.filter(text_status=status_param)
         if therapist:
-            qs = qs.filter(therapist_id=therapist)
+            qs = qs.filter(target_id=therapist)
         return Response(AdminTherapistReviewSerializer(qs[:200], many=True).data)
 
 
@@ -529,7 +536,9 @@ class AdminReviewApproveView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def post(self, request, pk: int):
-        review = get_object_or_404(TherapistReview, pk=pk)
+        from apps.modules.reviews.models import Review
+
+        review = get_object_or_404(Review, pk=pk, institute__slug="psy")
         ser = LeaveReviewSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
@@ -547,7 +556,9 @@ class AdminReviewRejectView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def post(self, request, pk: int):
-        review = get_object_or_404(TherapistReview, pk=pk)
+        from apps.modules.reviews.models import Review
+
+        review = get_object_or_404(Review, pk=pk, institute__slug="psy")
         ser = LeaveReviewSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
@@ -561,148 +572,3 @@ class AdminReviewRejectView(APIView):
         return Response(AdminTherapistReviewSerializer(review).data)
 
 
-class AdminShopOrderUpdateSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=Order.Status.choices, required=False)
-    tracking_code = serializers.CharField(required=False, allow_blank=True)
-    admin_note = serializers.CharField(required=False, allow_blank=True)
-
-
-def _admin_orders():
-    return Order.objects.select_related("patient__user").prefetch_related(
-        "items__product"
-    )
-
-
-class AdminShopOrderListView(APIView):
-    permission_classes = [IsAuthenticated, IsPsyAdmin]
-
-    def get(self, request):
-        qs = _admin_orders().order_by("-created_at")
-        status = request.query_params.get("status")
-        query = (request.query_params.get("q") or "").strip()
-        if status:
-            qs = qs.filter(status=status)
-        if query:
-            qs = qs.filter(
-                Q(number__icontains=query)
-                | Q(patient__user__username__icontains=query)
-                | Q(patient__user__first_name__icontains=query)
-                | Q(patient__user__last_name__icontains=query)
-                | Q(shipping_full_name__icontains=query)
-            )
-        page, page_size, total, items = _paginate(qs, request)
-        return Response(
-            {
-                "count": total,
-                "page": page,
-                "page_size": page_size,
-                "results": ShopOrderSerializer(
-                    items, many=True, context={"request": request}
-                ).data,
-            }
-        )
-
-
-class AdminShopOrderDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsPsyAdmin]
-
-    def get(self, request, pk: int):
-        order = get_object_or_404(_admin_orders(), pk=pk)
-        return Response(ShopOrderSerializer(order, context={"request": request}).data)
-
-    def patch(self, request, pk: int):
-        order = get_object_or_404(Order, pk=pk)
-        ser = AdminShopOrderUpdateSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        data = ser.validated_data
-        try:
-            order = services.admin_update_order(
-                order=order,
-                status=data.get("status"),
-                tracking_code=data.get("tracking_code"),
-                admin_note=data.get("admin_note"),
-            )
-        except services.ShopError as exc:
-            return Response(
-                {"code": exc.code, "detail": str(exc), **exc.extra},
-                status=400,
-            )
-        order = get_object_or_404(_admin_orders(), pk=order.pk)
-        return Response(ShopOrderSerializer(order, context={"request": request}).data)
-
-
-class AdminShopOrderRefundView(APIView):
-    permission_classes = [IsAuthenticated, IsPsyAdmin]
-
-    def post(self, request, pk: int):
-        order = get_object_or_404(Order, pk=pk)
-        reason = ""
-        if isinstance(request.data, dict):
-            reason = request.data.get("reason") or ""
-        try:
-            order = services.cancel_order(
-                order=order, canceled_by="admin", reason=reason
-            )
-        except services.ShopError as exc:
-            return Response(
-                {"code": exc.code, "detail": str(exc), **exc.extra},
-                status=400,
-            )
-        order = get_object_or_404(_admin_orders(), pk=order.pk)
-        return Response(ShopOrderSerializer(order, context={"request": request}).data)
-
-
-class AdminShopStatsView(APIView):
-    permission_classes = [IsAuthenticated, IsPsyAdmin]
-
-    def get(self, request):
-        now = timezone.now()
-        paid = Order.objects.filter(status__in=services.PAID_STATUSES)
-
-        def revenue_since(since):
-            return paid.filter(paid_at__gte=since).aggregate(
-                total=Coalesce(Sum("total"), Decimal("0")),
-                n=Count("id"),
-            )
-
-        by_status = {
-            row["status"]: row["n"]
-            for row in Order.objects.values("status").annotate(n=Count("id"))
-        }
-        top = (
-            OrderItem.objects.filter(order__status__in=services.PAID_STATUSES)
-            .values("title")
-            .annotate(
-                quantity=Coalesce(Sum("quantity"), 0),
-                revenue=Coalesce(Sum("line_total"), Decimal("0")),
-            )
-            .order_by("-revenue")[:8]
-        )
-        recent = _admin_orders().order_by("-created_at")[:8]
-        all_time = paid.aggregate(
-            total=Coalesce(Sum("total"), Decimal("0")), n=Count("id")
-        )
-        week = revenue_since(now - timedelta(days=7))
-        month = revenue_since(now - timedelta(days=30))
-        return Response(
-            {
-                "revenue_total": str(all_time["total"]),
-                "orders_paid_count": all_time["n"],
-                "revenue_7d": str(week["total"]),
-                "orders_7d": week["n"],
-                "revenue_30d": str(month["total"]),
-                "orders_30d": month["n"],
-                "orders_by_status": by_status,
-                "top_products": [
-                    {
-                        "title": row["title"],
-                        "quantity": row["quantity"],
-                        "revenue": str(row["revenue"]),
-                    }
-                    for row in top
-                ],
-                "recent_orders": ShopOrderSerializer(
-                    recent, many=True, context={"request": request}
-                ).data,
-            }
-        )

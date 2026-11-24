@@ -7,18 +7,41 @@ Finance is integrated with opaque reference strings like:
 (``payment_ref``,``deposit_ledger_ref``, ``refund_ledger_ref``, ``withdrawal_ref``).
 
 This app never mutates ``Wallet.balance`` — all money movement goes through 
-``apps.finance.services``.
+``apps.kernel.finance.services``.
 
 """
 
 from __future__ import annotations
 
 from django.conf import settings
+from django.contrib.contenttypes.fields import GenericRelation
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import F, Q
 
-from apps.core.models import TimeStampedModel
+from apps.kernel.core.models import TimeStampedModel
+
+
+def default_psy_institute_id():
+    """Rows created before a caller passes an institute stay on the psy center."""
+    from apps.kernel.tenancy.models import Institute
+
+    return Institute.objects.only("id").get(slug="psy").pk
+
+
+class PsyScopedModel(TimeStampedModel):
+    """Retained psy clinical and ticket rows. Shared modules do not use this."""
+
+    institute = models.ForeignKey(
+        "tenancy.Institute",
+        on_delete=models.PROTECT,
+        related_name="+",
+        default=default_psy_institute_id,
+        verbose_name="مرکز",
+    )
+
+    class Meta:
+        abstract = True
 
 
 # ===========================================================================
@@ -26,7 +49,7 @@ from apps.core.models import TimeStampedModel
 # ===========================================================================
 
 
-class TherapistProfile(TimeStampedModel):
+class TherapistProfile(PsyScopedModel):
     """Clinic therapist. One-to-one with the auth user."""
 
     user = models.OneToOneField(
@@ -48,6 +71,20 @@ class TherapistProfile(TimeStampedModel):
         default=True, verbose_name="پذیرش مراجع"
     )
     is_active = models.BooleanField(default=True, verbose_name="فعال")
+    provider = models.OneToOneField(
+        "booking.Provider",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="therapist_profile",
+        verbose_name="ارائه‌دهنده نوبت",
+    )
+    shared_reviews = GenericRelation(
+        "reviews.Review",
+        content_type_field="target_type",
+        object_id_field="target_id",
+        related_query_name="shared_review",
+    )
 
     class Meta:
         ordering = ["display_name"]
@@ -58,7 +95,7 @@ class TherapistProfile(TimeStampedModel):
         return self.display_name
 
 
-class PatientProfile(TimeStampedModel):
+class PatientProfile(PsyScopedModel):
     """Clinic patient. One-to-one with the auth user."""
 
     user = models.OneToOneField(
@@ -347,7 +384,7 @@ class AppointmentSlot(TimeStampedModel):
 
 
 class Appointment(TimeStampedModel):
-    """A booked slot. Payment/refund refs point into ``apps.finance``."""
+    """A booked slot. Payment/refund refs point into ``apps.kernel.finance``."""
 
     class Status(models.TextChoices):
         PENDING_PAYMENT = "pending_payment", "Pending payment"
@@ -496,11 +533,42 @@ class TherapistReview(TimeStampedModel):
         return f"Review<{self.pk}> appt={self.appointment_id} {self.rating}★"
 
 
-class SessionNote(TimeStampedModel):
+class PsyReviewContext(PsyScopedModel):
+    """Psychology eligibility stays here until booking owns the appointment.
+
+    One completed appointment owned by the patient can have one review.
+    The shared review targets the therapist profile for now.
+    """
+
+    review = models.OneToOneField(
+        "reviews.Review",
+        on_delete=models.CASCADE,
+        related_name="psy_context",
+        verbose_name="نظر",
+    )
+    appointment = models.OneToOneField(
+        "booking.Appointment",
+        on_delete=models.CASCADE,
+        related_name="review_context",
+        verbose_name="نوبت",
+    )
+    patient = models.ForeignKey(
+        PatientProfile,
+        on_delete=models.PROTECT,
+        related_name="review_contexts",
+        verbose_name="مراجع",
+    )
+
+    class Meta:
+        verbose_name = "زمینه نظر روان‌شناسی"
+        verbose_name_plural = "زمینه‌های نظر روان‌شناسی"
+
+
+class SessionNote(PsyScopedModel):
     """Therapist note on an appointment. Hidden from the patient unless shared."""
 
     appointment = models.ForeignKey(
-        Appointment,
+        "booking.Appointment",
         on_delete=models.CASCADE,
         related_name="notes",
         verbose_name="نوبت",
@@ -527,14 +595,14 @@ class SessionNote(TimeStampedModel):
 # ===========================================================================
 
 
-class ClinicalReport(TimeStampedModel):
+class ClinicalReport(PsyScopedModel):
     """Mandatory private report after a completed appointment.
 
     Distinct from ``SessionNote``. Patients never see this record.
     """
 
     appointment = models.OneToOneField(
-        Appointment,
+        "booking.Appointment",
         on_delete=models.PROTECT,
         related_name="clinical_report",
         verbose_name="نوبت",
@@ -571,7 +639,7 @@ class ClinicalReport(TimeStampedModel):
         return f"ClinicalReport<{self.pk}> appt={self.appointment_id}"
 
 
-class FileAccessRequest(TimeStampedModel):
+class FileAccessRequest(PsyScopedModel):
     """Therapist request for temporary access to a patient's master file."""
 
     class Status(models.TextChoices):
@@ -1042,7 +1110,7 @@ class SitePage(TimeStampedModel):
 # ===========================================================================
 
 
-class Ticket(TimeStampedModel):
+class Ticket(PsyScopedModel):
     """Patient support thread. Withdrawal tickets store a finance ref, not a wallet write."""
 
     class Type(models.TextChoices):
@@ -1089,7 +1157,7 @@ class Ticket(TimeStampedModel):
         verbose_name_plural = "تیکت ها"
 
 
-class TicketMessage(TimeStampedModel):
+class TicketMessage(PsyScopedModel):
     """One message on a ticket. ``is_staff_reply`` marks clinic-admin replies."""
 
     ticket = models.ForeignKey(

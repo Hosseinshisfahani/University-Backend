@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 data/
+private_media/
 compose.env
 deploy/app.env
