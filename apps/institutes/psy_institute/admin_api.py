@@ -321,46 +321,12 @@ class AdminFinanceSummaryView(APIView):
     permission_classes = [IsAuthenticated, IsPsyAdmin]
 
     def get(self, request):
+        from apps.kernel.finance.reports import institute_summary
+        from apps.kernel.tenancy.models import Institute
+
         date_from, date_to = _parse_range(request)
-        ledger = LedgerEntry.objects.filter(
-            institute__slug="psy",
-            created_at__date__gte=date_from,
-            created_at__date__lte=date_to,
-        )
-        gateway = Payment.objects.filter(
-            institute__slug="psy",
-            status=Payment.Status.SUCCEEDED,
-            provider__in=[Payment.Provider.SEP, Payment.Provider.VANDAR],
-            created_at__date__gte=date_from,
-            created_at__date__lte=date_to,
-        )
-        capture = ledger.filter(
-            entry_type=LedgerEntry.EntryType.APPOINTMENT_CAPTURE
-        ).aggregate(total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id"))
-        refund = ledger.filter(entry_type=LedgerEntry.EntryType.REFUND).aggregate(
-            total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
-        )
-        shop = ledger.filter(entry_type=LedgerEntry.EntryType.SHOP_PURCHASE).aggregate(
-            total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
-        )
-        gateway_agg = gateway.aggregate(
-            total=Coalesce(Sum("amount"), Decimal("0")), n=Count("id")
-        )
-        return Response(
-            {
-                "from": str(date_from),
-                "to": str(date_to),
-                "gateway_succeeded_total": str(gateway_agg["total"]),
-                "gateway_succeeded_count": gateway_agg["n"],
-                "appointment_capture_total": str(capture["total"]),
-                "appointment_capture_count": capture["n"],
-                "refund_total": str(refund["total"]),
-                "refund_count": refund["n"],
-                "shop_purchase_total": str(shop["total"]),
-                "shop_purchase_count": shop["n"],
-                "net_appointment_revenue": str(capture["total"] - refund["total"]),
-            }
-        )
+        institute = Institute.objects.get(slug="psy")
+        return Response(institute_summary(institute, date_from, date_to))
 
 
 class AdminFinanceLedgerView(APIView):
@@ -422,7 +388,7 @@ class AdminFinancePaymentsView(APIView):
         if status_param:
             qs = qs.filter(status=status_param)
         if provider == "gateway":
-            qs = qs.filter(provider__in=[Payment.Provider.SEP, Payment.Provider.VANDAR])
+            qs = qs.filter(provider=Payment.Provider.VANDAR, kind=Payment.Kind.CHECKOUT)
         elif provider:
             qs = qs.filter(provider=provider)
         if date_from:

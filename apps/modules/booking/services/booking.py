@@ -23,6 +23,7 @@ from ..signals import (
 
 OFFLINE_PAYMENT_REF = "offline"
 HOLD_MINUTES = 15
+GATEWAY_HOLD_MINUTES = 60
 
 
 class BookingError(Exception):
@@ -85,8 +86,9 @@ def confirm_appointment_payment(
     *,
     appointment: Appointment,
     payment_ref: str,
-    idempotency_key: str,
+    idempotency_key: str = "",
     allow_offline: bool = False,
+    source: str = "wallet",
 ) -> Appointment:
     appointment = Appointment.objects.select_for_update().select_related(
         "customer", "provider", "slot"
@@ -97,12 +99,12 @@ def confirm_appointment_payment(
         raise BookingError("Offline payment is admin-only.")
 
     ledger_ref = ""
-    if payment_ref != OFFLINE_PAYMENT_REF:
+    if payment_ref != OFFLINE_PAYMENT_REF and source != "gateway":
         entry = finance_services.debit_wallet(
             user=appointment.customer,
             amount=Decimal(appointment.price_snapshot),
             entry_type=LedgerEntry.EntryType.APPOINTMENT_CAPTURE,
-            idempotency_key=idempotency_key,
+            idempotency_key=f"booking-pay:{appointment.pk}",
             reference=f"booking.appointment:{appointment.pk}",
             description=f"Appointment {appointment.pk}",
             institute=appointment.institute,
@@ -155,6 +157,11 @@ def cancel_appointment(*, appointment: Appointment, canceled_by: str, reason: st
 
     refund_ref = ""
     if policy == Appointment.RefundPolicy.FULL_REFUND:
+        gateway_payment = None
+        if appointment.gateway_payment_id:
+            from apps.kernel.finance.models import Payment
+
+            gateway_payment = Payment.objects.filter(pk=appointment.gateway_payment_id).first()
         entry = finance_services.credit_wallet(
             user=appointment.customer,
             amount=Decimal(appointment.price_snapshot),
@@ -163,6 +170,7 @@ def cancel_appointment(*, appointment: Appointment, canceled_by: str, reason: st
             reference=f"booking.appointment:{appointment.pk}",
             description="Appointment cancellation refund",
             institute=appointment.institute,
+            payment=gateway_payment,
         )
         refund_ref = f"finance.ledger:{entry.pk}"
 
@@ -255,3 +263,73 @@ def complete_appointment(*, appointment: Appointment) -> Appointment:
     appointment.save(update_fields=["status", "updated_at"])
     appointment_completed.send(sender=Appointment, appointment=appointment)
     return appointment
+
+
+@transaction.atomic
+def start_appointment_gateway(*, appointment: Appointment, request_host: str = "") -> dict:
+    appointment = Appointment.objects.select_for_update().select_related(
+        "customer", "slot", "institute"
+    ).get(pk=appointment.pk)
+    now = timezone.now()
+    if appointment.status != Appointment.Status.PENDING_PAYMENT:
+        raise BookingError("Appointment is not awaiting payment.")
+    if appointment.slot.hold_expires_at and appointment.slot.hold_expires_at <= now:
+        raise BookingError("Hold expired.")
+    amount = Decimal(appointment.price_snapshot)
+    if amount <= 0:
+        raise BookingError("This appointment has no fee.")
+    try:
+        result = finance_services.start_checkout(
+            user=appointment.customer,
+            purpose=f"booking.appointment:{appointment.pk}",
+            amount_irr=amount,
+            institute=appointment.institute,
+            return_path=f"/patient/appointments/{appointment.pk}",
+            request_host=request_host,
+        )
+    except finance_services.FinanceError as exc:
+        raise BookingError(str(exc)) from exc
+    appointment.gateway_payment_id = result["payment"].pk
+    appointment.save(update_fields=["gateway_payment_id", "updated_at"])
+    slot = appointment.slot
+    slot.hold_expires_at = now + timedelta(minutes=GATEWAY_HOLD_MINUTES)
+    slot.save(update_fields=["hold_expires_at", "updated_at"])
+    return result
+
+
+def fulfill_appointment_checkout(payment) -> None:
+    from apps.kernel.finance.checkout import CheckoutNotFulfillable
+
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        raise CheckoutNotFulfillable("purpose is not an appointment")
+    try:
+        appointment = Appointment.objects.select_related("slot").get(pk=int(raw))
+    except Appointment.DoesNotExist as exc:
+        raise CheckoutNotFulfillable("appointment is missing") from exc
+    ref = f"finance.payment:{payment.public_id}"
+    if appointment.status == Appointment.Status.CONFIRMED:
+        if appointment.payment_ref == ref:
+            return
+        raise CheckoutNotFulfillable("appointment is already confirmed")
+    if appointment.customer_id != payment.user_id:
+        raise CheckoutNotFulfillable("appointment does not match the payment")
+    try:
+        confirm_appointment_payment(
+            appointment=appointment,
+            payment_ref=ref,
+            source="gateway",
+        )
+    except BookingError as exc:
+        raise CheckoutNotFulfillable(str(exc)) from exc
+    Appointment.objects.filter(pk=appointment.pk).update(gateway_payment_id=payment.pk)
+
+
+def release_appointment_checkout(payment) -> None:
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        return
+    appointment = Appointment.objects.select_related("slot").filter(pk=int(raw)).first()
+    if appointment is None or appointment.status != Appointment.Status.PENDING_PAYMENT:
+        return
+    cancel_appointment(appointment=appointment, canceled_by="patient", reason="gateway expired")

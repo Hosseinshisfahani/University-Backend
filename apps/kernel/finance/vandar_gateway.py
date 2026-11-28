@@ -54,6 +54,7 @@ class VandarMoneyResult:
     amount: Decimal | None = None
     trans_id: str = ""
     card_number: str = ""
+    factor_number: str = ""
     message: str = ""
     request_payload: dict[str, Any] = field(default_factory=dict)
     response_payload: dict[str, Any] = field(default_factory=dict)
@@ -139,11 +140,11 @@ def _require_live_config() -> tuple[str, str]:
     return api_key, callback
 
 
-def _amount_covers(returned: Any, expected: Decimal) -> tuple[bool, Decimal | None]:
+def _amount_matches(returned: Any, expected: Decimal) -> tuple[bool, Decimal | None]:
     if returned is None or str(returned).strip() == "":
         return False, None
     parsed = Decimal(str(returned)).to_integral_value()
-    return parsed >= expected, parsed
+    return parsed == expected, parsed
 
 
 def _confirm_required(message: str) -> bool:
@@ -164,11 +165,12 @@ def _interpret(
 ) -> VandarMoneyResult:
     message = str(response_payload.get("message") or "")
     status = response_payload.get("status")
-    amount_ok, parsed = _amount_covers(response_payload.get("amount"), expected)
+    amount_ok, parsed = _amount_matches(response_payload.get("amount"), expected)
     common = dict(
         amount=parsed,
         trans_id=str(response_payload.get("transId") or ""),
         card_number=str(response_payload.get("cardNumber") or ""),
+        factor_number=str(response_payload.get("factorNumber") or ""),
         request_payload=request_payload,
         response_payload=response_payload,
         sandbox=sandbox,
@@ -227,8 +229,9 @@ def request_token(
     mobile_number: str = "",
 ) -> VandarTokenResult:
     amount_int = int(amount)
-    if amount_int < 1000:
-        raise VandarGatewayError("Amount must be at least 1000 rials.")
+    minimum = int(getattr(settings, "VANDAR_MIN_AMOUNT_IRR", 1000))
+    if amount_int < minimum:
+        raise VandarGatewayError(f"Amount must be at least {minimum} rials.")
 
     api_key = getattr(settings, "VANDAR_API_KEY", "") or ""
     callback = getattr(settings, "VANDAR_CALLBACK_URL", "") or ""
@@ -270,23 +273,41 @@ def request_token(
     )
 
 
-def verify_transaction(*, token: str, expected_amount: Decimal | int) -> VandarMoneyResult:
+def verify_transaction(
+    *,
+    token: str,
+    expected_amount: Decimal | int,
+    expected_factor: str = "",
+) -> VandarMoneyResult:
     return _money_call(
         url=settings.VANDAR_VERIFY_URL,
         token=token,
         expected_amount=expected_amount,
+        expected_factor=expected_factor,
     )
 
 
-def inquire_transaction(*, token: str, expected_amount: Decimal | int) -> VandarMoneyResult:
+def inquire_transaction(
+    *,
+    token: str,
+    expected_amount: Decimal | int,
+    expected_factor: str = "",
+) -> VandarMoneyResult:
     return _money_call(
         url=settings.VANDAR_TRANSACTION_URL,
         token=token,
         expected_amount=expected_amount,
+        expected_factor=expected_factor,
     )
 
 
-def _money_call(*, url: str, token: str, expected_amount: Decimal | int) -> VandarMoneyResult:
+def _money_call(
+    *,
+    url: str,
+    token: str,
+    expected_amount: Decimal | int,
+    expected_factor: str = "",
+) -> VandarMoneyResult:
     expected = Decimal(int(expected_amount))
     api_key = getattr(settings, "VANDAR_API_KEY", "") or ""
     request_payload = {"api_key": api_key, "token": token}
@@ -298,13 +319,16 @@ def _money_call(*, url: str, token: str, expected_amount: Decimal | int) -> Vand
             confirm_required=False,
             amount=expected,
             trans_id=f"sandbox-trans-{token}",
+            factor_number=expected_factor,
             message="ok",
             request_payload=_redact(request_payload),
             response_payload={
                 "status": 1,
                 "amount": str(int(expected)),
+                "realAmount": int(expected),
                 "message": "ok",
                 "transId": f"sandbox-trans-{token}",
+                "factorNumber": expected_factor,
                 "sandbox": True,
             },
             sandbox=True,

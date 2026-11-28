@@ -31,22 +31,18 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             "id",
+            "public_id",
+            "kind",
             "amount",
             "status",
+            "fulfillment_status",
             "provider",
             "provider_ref",
             "purpose",
-            "metadata",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = [
-            "id",
-            "status",
-            "provider_ref",
-            "created_at",
-            "updated_at",
-        ]
+        read_only_fields = fields
 
 
 class CreatePaymentSerializer(serializers.Serializer):

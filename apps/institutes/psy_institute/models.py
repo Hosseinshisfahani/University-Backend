@@ -1,7 +1,9 @@
 """Psychology institute domain models.
 
-It owns clinic people, schedule inventory, appointments, psychometrics,
-workshops, the clinic shop, CMS, and support tickets.
+Clinic people, clinical records, and support tickets stay writable here.
+Scheduling, workshops, the shop, psychometrics, reviews, and CMS remain as
+frozen history tables (`LegacyTable`). Django admin and application code
+write the shared module that owns each of those domains.
 
 Finance is integrated with opaque reference strings like:
 (``payment_ref``,``deposit_ledger_ref``, ``refund_ledger_ref``, ``withdrawal_ref``).
@@ -20,6 +22,8 @@ from django.db import models
 from django.db.models import F, Q
 
 from apps.kernel.core.models import TimeStampedModel
+
+from .legacy import LegacyTable
 
 
 def default_psy_institute_id():
@@ -125,7 +129,7 @@ class PatientProfile(PsyScopedModel):
 # ===========================================================================
 
 
-class SessionType(TimeStampedModel):
+class SessionType(LegacyTable, TimeStampedModel):
     """Bookable session product: modality, duration, and price."""
 
     class Modality(models.TextChoices):
@@ -156,7 +160,7 @@ class SessionType(TimeStampedModel):
         return self.name
 
 
-class TherapistSessionOffer(TimeStampedModel):
+class TherapistSessionOffer(LegacyTable, TimeStampedModel):
     """Which session types a therapist is allowed to deliver."""
 
     therapist = models.ForeignKey(
@@ -187,7 +191,7 @@ class TherapistSessionOffer(TimeStampedModel):
 # ===========================================================================
 
 
-class TherapistAvailability(TimeStampedModel):
+class TherapistAvailability(LegacyTable, TimeStampedModel):
     """Recurring weekly window used to generate open slots.
 
     ``weekday`` is Python's weekday: 0=Monday … 6=Sunday.
@@ -232,7 +236,7 @@ class TherapistAvailability(TimeStampedModel):
         return f"{self.therapist} wd={self.weekday} {self.start_time}-{self.end_time}"
 
 
-class AvailabilityException(TimeStampedModel):
+class AvailabilityException(LegacyTable, TimeStampedModel):
     """One-off override of the weekly template (day off or a custom window)."""
 
     therapist = models.ForeignKey(
@@ -260,7 +264,7 @@ class AvailabilityException(TimeStampedModel):
         return f"Exception {self.therapist} {self.date}"
 
 
-class LeaveRequest(TimeStampedModel):
+class LeaveRequest(LegacyTable, TimeStampedModel):
     """Therapist leave. Admin approves; approval may block open slots."""
 
     class Status(models.TextChoices):
@@ -319,7 +323,7 @@ class LeaveRequest(TimeStampedModel):
         return f"Leave {self.therapist_id} {self.starts_on}–{self.ends_on} ({self.status})"
 
 
-class AppointmentSlot(TimeStampedModel):
+class AppointmentSlot(LegacyTable, TimeStampedModel):
     """Bookable inventory row generated from availability.
 
     Open slots leave ``session_type`` null. It is set when the slot is
@@ -383,7 +387,7 @@ class AppointmentSlot(TimeStampedModel):
 # ===========================================================================
 
 
-class Appointment(TimeStampedModel):
+class Appointment(LegacyTable, TimeStampedModel):
     """A booked slot. Payment/refund refs point into ``apps.kernel.finance``."""
 
     class Status(models.TextChoices):
@@ -468,7 +472,7 @@ class Appointment(TimeStampedModel):
         return f"Appointment<{self.pk}> {self.status}"
 
 
-class TherapistReview(TimeStampedModel):
+class TherapistReview(LegacyTable, TimeStampedModel):
     """Patient rating of a completed appointment.
 
     Stars always count toward the therapist average. ``body`` is public
@@ -705,7 +709,7 @@ class FileAccessRequest(PsyScopedModel):
 # ===========================================================================
 
 
-class PsychometricForm(TimeStampedModel):
+class PsychometricForm(LegacyTable, TimeStampedModel):
     """Published questionnaire. ``schema`` is the question JSON; ``version`` is frozen on submit."""
 
     title = models.CharField(max_length=200, verbose_name="عنوان")
@@ -731,7 +735,7 @@ class PsychometricForm(TimeStampedModel):
         return f"{self.title} v{self.version}"
 
 
-class PsychometricResponse(TimeStampedModel):
+class PsychometricResponse(LegacyTable, TimeStampedModel):
     """One patient's answers. Optionally routed to a therapist for review."""
 
     class Status(models.TextChoices):
@@ -782,7 +786,7 @@ class PsychometricResponse(TimeStampedModel):
 # ===========================================================================
 
 
-class Workshop(TimeStampedModel):
+class Workshop(LegacyTable, TimeStampedModel):
     """Public workshop catalog entry. Curriculum lives on sessions/resources."""
 
     title = models.CharField(max_length=200, verbose_name="عنوان")
@@ -830,7 +834,7 @@ class Workshop(TimeStampedModel):
         return self.title
 
 
-class WorkshopEnrollment(TimeStampedModel):
+class WorkshopEnrollment(LegacyTable, TimeStampedModel):
     """Patient seat on a workshop. One row per patient; status tracks pay/cancel."""
 
     class Status(models.TextChoices):
@@ -887,7 +891,7 @@ class WorkshopEnrollment(TimeStampedModel):
         verbose_name_plural = "ثبت‌نام های کارگاه"
 
 
-class WorkshopSession(TimeStampedModel):
+class WorkshopSession(LegacyTable, TimeStampedModel):
     """One curriculum unit inside a workshop (live or recorded)."""
 
     workshop = models.ForeignKey(
@@ -922,7 +926,7 @@ class WorkshopSession(TimeStampedModel):
         return f"{self.workshop.slug}: {self.title}"
 
 
-class WorkshopResource(TimeStampedModel):
+class WorkshopResource(LegacyTable, TimeStampedModel):
     """Downloadable material. Optional ``session`` scopes it to one unit."""
 
     class Kind(models.TextChoices):
@@ -968,7 +972,7 @@ class WorkshopResource(TimeStampedModel):
         return self.title
 
 
-class WorkshopSessionProgress(TimeStampedModel):
+class WorkshopSessionProgress(LegacyTable, TimeStampedModel):
     """Marks a session complete for one enrollment (used for certificates)."""
 
     enrollment = models.ForeignKey(
@@ -994,7 +998,7 @@ class WorkshopSessionProgress(TimeStampedModel):
         verbose_name_plural = "پیشرفت جلسات"
 
 
-class WorkshopCertificate(TimeStampedModel):
+class WorkshopCertificate(LegacyTable, TimeStampedModel):
     """Issued once per active enrollment when all sessions are complete."""
 
     enrollment = models.OneToOneField(
@@ -1024,7 +1028,7 @@ class WorkshopCertificate(TimeStampedModel):
 # ===========================================================================
 
 
-class BlogPost(TimeStampedModel):
+class BlogPost(LegacyTable, TimeStampedModel):
     """Public article. Drafts stay hidden until ``is_published`` is set."""
 
     title = models.CharField(max_length=200, verbose_name="عنوان")
@@ -1055,7 +1059,7 @@ class BlogPost(TimeStampedModel):
         verbose_name_plural = "مقالات"
 
 
-class NewsSlide(TimeStampedModel):
+class NewsSlide(LegacyTable, TimeStampedModel):
     """Landing carousel slide. Drafts stay hidden until ``is_published`` is set."""
 
     title = models.CharField(max_length=200, verbose_name="عنوان")
@@ -1090,7 +1094,7 @@ class NewsSlide(TimeStampedModel):
         return self.title
 
 
-class SitePage(TimeStampedModel):
+class SitePage(LegacyTable, TimeStampedModel):
     """Keyed CMS page (about, contact, …). ``body`` is structured JSON."""
 
     key = models.CharField(max_length=64, unique=True, verbose_name="کلید")
@@ -1188,7 +1192,7 @@ class TicketMessage(PsyScopedModel):
 # ===========================================================================
 
 
-class ProductCategory(TimeStampedModel):
+class ProductCategory(LegacyTable, TimeStampedModel):
     name = models.CharField(max_length=120, verbose_name="نام")
     slug = models.SlugField(unique=True, verbose_name="نامک")
     description = models.TextField(blank=True, verbose_name="توضیحات")
@@ -1204,7 +1208,7 @@ class ProductCategory(TimeStampedModel):
         return self.name
 
 
-class Product(TimeStampedModel):
+class Product(LegacyTable, TimeStampedModel):
     class Kind(models.TextChoices):
         PHYSICAL = "physical", "Physical"
         DIGITAL = "digital", "Digital"
@@ -1262,7 +1266,7 @@ class Product(TimeStampedModel):
         return self.title
 
 
-class Coupon(TimeStampedModel):
+class Coupon(LegacyTable, TimeStampedModel):
     class Kind(models.TextChoices):
         PERCENT = "percent", "Percent"
         FIXED = "fixed", "Fixed amount"
@@ -1307,7 +1311,7 @@ class Coupon(TimeStampedModel):
         return self.code
 
 
-class Cart(TimeStampedModel):
+class Cart(LegacyTable, TimeStampedModel):
     patient = models.OneToOneField(
         PatientProfile,
         on_delete=models.CASCADE,
@@ -1331,7 +1335,7 @@ class Cart(TimeStampedModel):
         return f"Cart<{self.patient_id}>"
 
 
-class CartItem(TimeStampedModel):
+class CartItem(LegacyTable, TimeStampedModel):
     cart = models.ForeignKey(
         Cart,
         on_delete=models.CASCADE,
@@ -1360,7 +1364,7 @@ class CartItem(TimeStampedModel):
         return f"{self.product_id} x{self.quantity}"
 
 
-class Order(TimeStampedModel):
+class Order(LegacyTable, TimeStampedModel):
     class Status(models.TextChoices):
         PENDING_PAYMENT = "pending_payment", "Pending payment"
         PAID = "paid", "Paid"
@@ -1447,7 +1451,7 @@ class Order(TimeStampedModel):
         return self.number
 
 
-class OrderItem(TimeStampedModel):
+class OrderItem(LegacyTable, TimeStampedModel):
     order = models.ForeignKey(
         Order,
         on_delete=models.CASCADE,
@@ -1479,7 +1483,7 @@ class OrderItem(TimeStampedModel):
         return f"{self.title} x{self.quantity}"
 
 
-class CouponRedemption(TimeStampedModel):
+class CouponRedemption(LegacyTable, TimeStampedModel):
     coupon = models.ForeignKey(
         Coupon,
         on_delete=models.PROTECT,

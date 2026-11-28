@@ -144,8 +144,7 @@ class ReviewSubmitSerializer(serializers.Serializer):
 
 
 class ConfirmSerializer(serializers.Serializer):
-    payment_ref = serializers.CharField()
-    idempotency_key = serializers.CharField()
+    payment_ref = serializers.CharField(required=False, default="wallet")
 
 
 class CancelSerializer(serializers.Serializer):

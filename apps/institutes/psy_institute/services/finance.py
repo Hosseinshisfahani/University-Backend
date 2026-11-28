@@ -1,8 +1,8 @@
 """Read-only earnings reports scoped to a single therapist.
 
-Clinic-wide ledger / SEP totals stay on the admin finance API.
+Clinic-wide gateway and ledger totals stay on the admin finance API.
 This module only sums ``Appointment.price_snapshot`` for the calling
-therapist's own paid sessions.
+therapist's own paid sessions inside that therapist's institute.
 """
 
 from __future__ import annotations
@@ -36,7 +36,10 @@ EXCLUDED_STATUSES = (
 
 def therapist_appointments_qs(therapist: TherapistProfile):
     """Inventory-owned rows only — never another therapist's book."""
-    return Appointment.objects.filter(slot__therapist=therapist)
+    return Appointment.objects.filter(
+        slot__therapist=therapist,
+        institute_id=therapist.institute_id,
+    )
 
 
 def therapist_finance_report(

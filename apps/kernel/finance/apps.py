@@ -6,3 +6,6 @@ class FinanceConfig(AppConfig):
     name = "apps.kernel.finance"
     label = "finance"
     verbose_name = "مالی"
+
+    def ready(self) -> None:
+        from . import checks  # noqa: F401

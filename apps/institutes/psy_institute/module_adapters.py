@@ -177,6 +177,7 @@ class PsyWorkshopViewSet(_PsyModuleView, CourseViewSet):
         patient_actions = {
             "enroll",
             "confirm_enrollment",
+            "pay_gateway",
             "complete_session",
             "issue_certificate",
             "get_certificate",

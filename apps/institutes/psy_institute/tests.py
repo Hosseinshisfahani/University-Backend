@@ -2237,8 +2237,11 @@ class ShopFlowTests(TestCase):
         payment = finance_services.create_payment(
             user=self.patient_user,
             amount=Decimal("80000"),
-            purpose=f"psy.order:{order_id}",
+            purpose=f"shop.order:{order_id}",
+            institute=Institute.objects.get(slug="psy"),
         )
+        payment.kind = "checkout"
+        payment.save(update_fields=["kind", "institute"])
         finance_services.confirm_payment(payment=payment)
         detail = self.client.get(
             reverse("psy_institute:shop-order-detail", kwargs={"pk": order_id})

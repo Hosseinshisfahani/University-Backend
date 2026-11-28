@@ -16,7 +16,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from apps.kernel.finance import services as finance_services
-from apps.kernel.finance.models import LedgerEntry, Wallet
+from apps.kernel.finance.models import LedgerEntry
 from apps.kernel.tenancy.models import Institute
 from apps.kernel.tenancy.registry import BOOTSTRAP_INSTITUTE_SLUG
 from apps.kernel.tenancy.services import is_institute_admin
@@ -412,7 +412,6 @@ def _lock_order(order: Order) -> Order:
 def pay_order_from_wallet(
     *,
     order: Order,
-    idempotency_key: str,
     payment_ref: str = "wallet",
 ) -> Order:
     from .signals import order_paid
@@ -455,7 +454,7 @@ def pay_order_from_wallet(
                     user=order.user,
                     amount=amount,
                     entry_type=LedgerEntry.EntryType.SHOP_PURCHASE,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=f"shop-pay:{order.pk}",
                     reference=reference,
                     description=order.number,
                     institute=order.institute,
@@ -496,7 +495,7 @@ def pay_order_from_wallet(
 
 
 @transaction.atomic
-def start_gateway_payment(*, order: Order) -> dict:
+def start_gateway_payment(*, order: Order, request_host: str = "") -> dict:
     order = _lock_order(order)
     now = timezone.now()
     if order.status in PAID_STATUSES:
@@ -506,24 +505,17 @@ def start_gateway_payment(*, order: Order) -> dict:
     if order.hold_expires_at and order.hold_expires_at <= now:
         raise ShopError("مهلت پرداخت سفارش تمام شده است.", code="hold_expired")
 
-    wallet = finance_services.get_or_create_wallet(order.user)
-    wallet = Wallet.objects.select_for_update().get(pk=wallet.pk)
-    balance = _rial(wallet.balance)
     total = _rial(order.total)
-    if balance >= total:
-        raise ShopError(
-            "موجودی کیف پول برای پرداخت این سفارش کافی است.",
-            code="wallet_covers",
-        )
-    shortfall = total - balance
-    toman = (shortfall + Decimal(9)) // Decimal(10)
+    if total <= 0:
+        raise ShopError("این سفارش مبلغی برای پرداخت ندارد.", code="nothing_to_pay")
     try:
-        result = finance_services.initiate_vandar_payment(
+        result = finance_services.start_checkout(
             user=order.user,
-            amount=toman,
             purpose=f"shop.order:{order.pk}",
+            amount_irr=total,
             institute=order.institute,
-            return_path="/orders",
+            return_path="/patient/shop/orders",
+            request_host=request_host,
         )
     except finance_services.FinanceError as exc:
         raise ShopError(str(exc), code="gateway_error") from exc
@@ -573,6 +565,11 @@ def cancel_order(*, order: Order, canceled_by: str, reason: str = "") -> Order:
 
     amount = _rial(order.total)
     if amount > 0:
+        gateway_payment = None
+        if order.gateway_payment_id:
+            from apps.kernel.finance.models import Payment
+
+            gateway_payment = Payment.objects.filter(pk=order.gateway_payment_id).first()
         entry = finance_services.credit_wallet(
             user=order.user,
             amount=amount,
@@ -581,6 +578,7 @@ def cancel_order(*, order: Order, canceled_by: str, reason: str = "") -> Order:
             reference=f"shop.order:{order.pk}",
             description=f"Refund {order.number}",
             institute=order.institute,
+            payment=gateway_payment,
         )
         order.refund_ledger_ref = f"finance.ledger:{entry.pk}"
         order.status = Order.Status.REFUNDED
@@ -640,6 +638,80 @@ def admin_update_order(
     if shipped_now:
         _emit(order_shipped, order=order)
     return order
+
+
+def fulfill_shop_checkout(payment) -> None:
+    """Direct-capture delivery. Raises CheckoutNotFulfillable when the money must return to the wallet."""
+    from apps.kernel.finance.checkout import CheckoutNotFulfillable
+
+    from .signals import order_paid
+
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        raise CheckoutNotFulfillable("purpose is not a shop order")
+    try:
+        order = _lock_order(Order.objects.get(pk=int(raw)))
+    except Order.DoesNotExist as exc:
+        raise CheckoutNotFulfillable("order is missing") from exc
+    if order.user_id != payment.user_id or order.institute_id != payment.institute_id:
+        raise CheckoutNotFulfillable("order does not match the payment")
+
+    ref = f"finance.payment:{payment.public_id}"
+    if order.status in PAID_STATUSES or order.status == Order.Status.REFUNDED:
+        if order.payment_ref == ref:
+            return
+        raise CheckoutNotFulfillable("order is already settled")
+
+    now = timezone.now()
+    if order.status != Order.Status.PENDING_PAYMENT:
+        raise CheckoutNotFulfillable("order is not awaiting payment")
+    if order.hold_expires_at and order.hold_expires_at <= now:
+        raise CheckoutNotFulfillable("hold expired")
+    for item in order.items.select_related("product"):
+        product = item.product
+        if not product.is_published or not product.is_available:
+            raise CheckoutNotFulfillable("a product is no longer available")
+    if order.coupon_id:
+        try:
+            _assert_coupon(
+                order.coupon,
+                Decimal(order.subtotal),
+                order.user,
+                exclude_order_id=order.pk,
+            )
+        except ShopError as exc:
+            raise CheckoutNotFulfillable(str(exc)) from exc
+
+    order.status = Order.Status.PAID
+    order.paid_at = now
+    order.hold_expires_at = None
+    order.payment_ref = ref
+    order.gateway_payment_id = payment.pk
+    order.save(
+        update_fields=[
+            "status",
+            "paid_at",
+            "hold_expires_at",
+            "payment_ref",
+            "gateway_payment_id",
+            "updated_at",
+        ]
+    )
+    if order.coupon_id:
+        _redeem(order.coupon, order, order.user)
+    _emit(order_paid, order=order)
+
+
+def release_shop_checkout(payment) -> None:
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        return
+    order = Order.objects.filter(pk=int(raw)).first()
+    if order is None or order.status != Order.Status.PENDING_PAYMENT:
+        return
+    if order.gateway_payment_id and order.gateway_payment_id != payment.pk:
+        return
+    cancel_order(order=order, canceled_by="patient", reason="gateway expired")
 
 
 def user_can_download(user, product: Product) -> bool:

@@ -36,7 +36,6 @@ from .serializers import (
     CheckoutSerializer,
     CouponCodeSerializer,
     CouponSerializer,
-    PayOrderSerializer,
     ProductCategorySerializer,
     ProductSerializer,
     ShopOrderSerializer,
@@ -319,14 +318,9 @@ class ShopOrderViewSet(InstituteScopedMixin, viewsets.GenericViewSet):
 
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None, **kwargs):
-        ser = PayOrderSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
         order = get_object_or_404(self.get_queryset(), pk=pk)
         try:
-            order = services.pay_order_from_wallet(
-                order=order,
-                idempotency_key=ser.validated_data["idempotency_key"],
-            )
+            order = services.pay_order_from_wallet(order=order)
         except services.ShopError as exc:
             return _shop_error(exc)
         order = self.get_queryset().get(pk=order.pk)
@@ -336,7 +330,9 @@ class ShopOrderViewSet(InstituteScopedMixin, viewsets.GenericViewSet):
     def gateway(self, request, pk=None, **kwargs):
         order = get_object_or_404(self.get_queryset(), pk=pk)
         try:
-            result = services.start_gateway_payment(order=order)
+            result = services.start_gateway_payment(
+                order=order, request_host=request.get_host()
+            )
         except services.ShopError as exc:
             return _shop_error(exc)
         order.refresh_from_db()
@@ -345,7 +341,7 @@ class ShopOrderViewSet(InstituteScopedMixin, viewsets.GenericViewSet):
                 "redirect_url": result["redirect_url"],
                 "provider_ref": result["provider_ref"],
                 "sandbox": result["sandbox"],
-                "payment_id": result["payment"].pk,
+                "payment_id": str(result["payment"].public_id),
                 "order": self.get_serializer(order).data,
             },
             status=201,

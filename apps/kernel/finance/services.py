@@ -1,8 +1,23 @@
+import logging
+import re
 from decimal import Decimal
+from urllib.parse import urlparse
 
-from django.db import transaction
+from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.utils import timezone
 
-from .models import LedgerEntry, Payment, Wallet, WithdrawalRequest
+from .checkout import CheckoutNotFulfillable, handler_for
+from .models import LedgerEntry, Payment, PaymentEvent, Wallet, WithdrawalRequest
+
+logger = logging.getLogger(__name__)
+
+_RETURN_PATH = re.compile(r"/[a-z0-9/_-]*")
+OPEN_CHECKOUT_STATUSES = (
+    Payment.Status.CREATED,
+    Payment.Status.PENDING,
+    Payment.Status.INDETERMINATE,
+)
 
 
 class FinanceError(Exception):
@@ -29,8 +44,7 @@ RESERVED_PURPOSE_PREFIXES = (
     "vandar:",
 )
 
-# Current and legacy shop purposes. Callers import this so modules stay neutral.
-SHOP_ORDER_PURPOSE_PREFIXES = ("shop.order:", "psy.order:")
+SHOP_ORDER_PURPOSE_PREFIXES = ("shop.order:",)
 
 
 def assert_public_purpose(purpose: str) -> None:
@@ -44,6 +58,26 @@ def get_or_create_wallet(user) -> Wallet:
     return wallet
 
 
+def _assert_same_entry(
+    existing: LedgerEntry,
+    *,
+    wallet: Wallet,
+    direction: str,
+    amount: Decimal,
+    entry_type: str,
+) -> LedgerEntry:
+    if (
+        existing.wallet_id != wallet.pk
+        or existing.direction != direction
+        or existing.amount != amount
+        or existing.entry_type != entry_type
+    ):
+        raise IdempotencyConflict(
+            "Idempotency key is already used for a different ledger entry."
+        )
+    return existing
+
+
 def _apply_entry(
     *,
     wallet: Wallet,
@@ -55,16 +89,22 @@ def _apply_entry(
     description: str = "",
     created_by=None,
     institute=None,
+    payment: Payment | None = None,
 ) -> LedgerEntry:
     if amount <= 0:
         raise FinanceError("Amount must be positive.")
 
-    existing = LedgerEntry.objects.filter(idempotency_key=idempotency_key).first()
-    if existing:
-        return existing
-
     with transaction.atomic():
         locked = Wallet.objects.select_for_update().get(pk=wallet.pk)
+        existing = LedgerEntry.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            return _assert_same_entry(
+                existing,
+                wallet=locked,
+                direction=direction,
+                amount=amount,
+                entry_type=entry_type,
+            )
         if not locked.is_active:
             raise FinanceError("Wallet is inactive.")
 
@@ -79,19 +119,35 @@ def _apply_entry(
 
         locked.balance = new_balance
         locked.save(update_fields=["balance", "updated_at"])
-
-        return LedgerEntry.objects.create(
-            wallet=locked,
-            direction=direction,
-            amount=amount,
-            balance_after=new_balance,
-            entry_type=entry_type,
-            reference=reference,
-            idempotency_key=idempotency_key,
-            description=description,
-            created_by=created_by,
-            institute=institute,
-        )
+        try:
+            with transaction.atomic():
+                return LedgerEntry.objects.create(
+                    wallet=locked,
+                    direction=direction,
+                    amount=amount,
+                    balance_after=new_balance,
+                    entry_type=entry_type,
+                    reference=reference,
+                    idempotency_key=idempotency_key,
+                    description=description,
+                    created_by=created_by,
+                    institute=institute,
+                    payment=payment,
+                )
+        except IntegrityError:
+            if direction == LedgerEntry.Direction.CREDIT:
+                locked.balance = locked.balance - amount
+            else:
+                locked.balance = locked.balance + amount
+            locked.save(update_fields=["balance", "updated_at"])
+            existing = LedgerEntry.objects.get(idempotency_key=idempotency_key)
+            return _assert_same_entry(
+                existing,
+                wallet=locked,
+                direction=direction,
+                amount=amount,
+                entry_type=entry_type,
+            )
 
 
 def credit_wallet(
@@ -104,6 +160,7 @@ def credit_wallet(
     description: str = "",
     created_by=None,
     institute=None,
+    payment: Payment | None = None,
 ) -> LedgerEntry:
     wallet = get_or_create_wallet(user)
     return _apply_entry(
@@ -116,6 +173,7 @@ def credit_wallet(
         description=description,
         created_by=created_by,
         institute=institute,
+        payment=payment,
     )
 
 
@@ -129,6 +187,7 @@ def debit_wallet(
     description: str = "",
     created_by=None,
     institute=None,
+    payment: Payment | None = None,
 ) -> LedgerEntry:
     wallet = get_or_create_wallet(user)
     return _apply_entry(
@@ -141,6 +200,7 @@ def debit_wallet(
         description=description,
         created_by=created_by,
         institute=institute,
+        payment=payment,
     )
 
 
@@ -187,27 +247,62 @@ def confirm_payment(
     ):
         raise FinanceError(f"Cannot confirm payment in status {payment.status}.")
 
-    key = idempotency_key or f"payment-confirm:{payment.pk}"
-    entry = credit_wallet(
-        user=payment.user,
-        amount=payment.amount,
-        entry_type=LedgerEntry.EntryType.DEPOSIT,
-        idempotency_key=key,
-        reference=f"finance.payment:{payment.pk}",
-        description=payment.purpose or "Payment deposit",
-        institute=payment.institute,
-    )
-    payment.status = Payment.Status.SUCCEEDED
+    now = timezone.now()
+    entry = None
+    if payment.kind == Payment.Kind.CHECKOUT:
+        pair = handler_for(payment.purpose or "")
+        if pair is None:
+            raise FinanceError("No checkout handler is registered for this payment.")
+        fulfill, _release = pair
+        try:
+            with transaction.atomic():
+                fulfill(payment)
+        except CheckoutNotFulfillable:
+            entry = credit_wallet(
+                user=payment.user,
+                amount=payment.amount,
+                entry_type=LedgerEntry.EntryType.REFUND,
+                idempotency_key=f"payment-refund:{payment.pk}",
+                reference=f"finance.payment:{payment.pk}",
+                description="Checkout could not be fulfilled",
+                institute=payment.institute,
+                payment=payment,
+            )
+            payment.fulfillment_status = Payment.FulfillmentStatus.REFUNDED_TO_WALLET
+        else:
+            payment.fulfillment_status = Payment.FulfillmentStatus.FULFILLED
+            payment.fulfilled_at = now
+    else:
+        key = idempotency_key or f"payment:{payment.pk}"
+        entry = credit_wallet(
+            user=payment.user,
+            amount=payment.amount,
+            entry_type=LedgerEntry.EntryType.DEPOSIT,
+            idempotency_key=key,
+            reference=f"finance.payment:{payment.pk}",
+            description=payment.purpose or "Payment deposit",
+            institute=payment.institute,
+            payment=payment,
+        )
+        payment.fulfillment_status = Payment.FulfillmentStatus.FULFILLED
+        payment.fulfilled_at = now
+
+    if entry is not None:
+        payment.ledger_entry = entry
+    if not payment.verified_at:
+        payment.verified_at = now
+    payment.transition(Payment.Status.SUCCEEDED)
     if provider_ref:
         payment.provider_ref = provider_ref
     if metadata:
         payment.metadata = {**(payment.metadata or {}), **metadata}
-    payment.ledger_entry = entry
     payment.save()
-    # Listeners (e.g. shop order finalization) must swallow their own errors.
     from .signals import payment_succeeded
 
-    payment_succeeded.send(sender=Payment, payment=payment)
+    try:
+        payment_succeeded.send(sender=Payment, payment=payment)
+    except Exception:
+        logger.exception("payment_succeeded listener failed for payment %s", payment.pk)
     return payment
 
 
@@ -216,14 +311,21 @@ def mark_payment_failed(
     *,
     payment: Payment,
     metadata: dict | None = None,
+    reason: str = "",
 ) -> Payment:
     payment = Payment.objects.select_for_update().get(pk=payment.pk)
-    if payment.status == Payment.Status.SUCCEEDED:
+    if payment.status in (
+        Payment.Status.SUCCEEDED,
+        Payment.Status.FAILED,
+        Payment.Status.CANCELED,
+    ):
         return payment
-    payment.status = Payment.Status.FAILED
+    payment.transition(Payment.Status.FAILED)
+    if reason:
+        payment.failure_reason = reason
     if metadata:
         payment.metadata = {**(payment.metadata or {}), **metadata}
-    payment.save(update_fields=["status", "metadata", "updated_at"])
+    payment.save(update_fields=["status", "failure_reason", "metadata", "updated_at"])
     return payment
 
 
@@ -238,74 +340,115 @@ def mark_payment_indeterminate(
         Payment.Status.SUCCEEDED,
         Payment.Status.FAILED,
         Payment.Status.CANCELED,
+        Payment.Status.INDETERMINATE,
     ):
         return payment
-    payment.status = Payment.Status.INDETERMINATE
+    payment.transition(Payment.Status.INDETERMINATE)
     if metadata:
         payment.metadata = {**(payment.metadata or {}), **metadata}
     payment.save(update_fields=["status", "metadata", "updated_at"])
     return payment
 
 
-def initiate_vandar_payment(
-    *,
-    user,
-    amount: Decimal,
-    purpose: str = "",
-    institute=None,
-    return_path: str = "",
-) -> dict:
-    """
-    Create a pending Vandar payment from a toman amount.
-    Returns {payment, redirect_url, provider_ref, sandbox}.
+def _event(payment: Payment, kind: str, payload: dict | None) -> None:
+    hidden = {"api_key", "cardnumber", "card_number", "card"}
+    safe = {}
+    for key, value in (payload or {}).items():
+        safe[key] = "***" if str(key).lower() in hidden else value
+    PaymentEvent.objects.create(payment=payment, kind=kind, payload=safe)
 
-    ``institute`` and ``return_path`` are stored as return metadata. They do
-    not set ``payment.institute``, so ledger attribution stays unchanged.
-    ``return_path`` is chosen by server code.
-    """
-    import re
 
+def _validate_return_path(return_path: str) -> str:
+    path = return_path or ""
+    if path and not _RETURN_PATH.fullmatch(path):
+        raise FinanceError("Return path is invalid.")
+    return path
+
+
+def resolve_return_host(*, institute, request_host: str) -> str:
+    from apps.kernel.tenancy.domains import DomainError, normalize_hostname
+    from apps.kernel.tenancy.hosts import neutral_hosts
+    from apps.kernel.tenancy.models import InstituteDomain
+
+    host = ""
+    if request_host:
+        try:
+            host = normalize_hostname(request_host, allow_dev_port=settings.DEBUG)
+        except DomainError:
+            host = ""
+    origin = (getattr(settings, "PLATFORM_FRONTEND_ORIGIN", "") or "").rstrip("/")
+    platform = (urlparse(origin).hostname or "").lower() if origin else ""
+    allowed_platform = {platform, *neutral_hosts()} - {""}
+
+    if institute is None:
+        if host and host in allowed_platform:
+            return host
+        if platform:
+            return platform
+        if host:
+            return host
+        raise FinanceError("No return host is configured.")
+
+    domains = set(
+        InstituteDomain.objects.filter(institute=institute, is_active=True).values_list(
+            "hostname", flat=True
+        )
+    )
+    if host and (host in domains or host in allowed_platform):
+        return host
+    canonical = (
+        InstituteDomain.objects.filter(
+            institute=institute, is_active=True, is_canonical=True
+        )
+        .order_by("id")
+        .first()
+    )
+    if canonical is not None:
+        return canonical.hostname
+    if platform:
+        return platform
+    raise FinanceError("No return host is configured.")
+
+
+def _minimum_rial() -> Decimal:
+    return Decimal(int(getattr(settings, "VANDAR_MIN_AMOUNT_IRR", 1000)))
+
+
+def _payment_result(payment: Payment, *, sandbox: bool | None = None) -> dict:
     from . import vandar_gateway
 
-    if return_path and not re.fullmatch(r"/[a-z0-9/_-]*", return_path):
-        raise FinanceError("Return path is invalid.")
+    if sandbox is None:
+        sandbox = vandar_gateway.is_sandbox()
+    return {
+        "payment": payment,
+        "redirect_url": vandar_gateway.build_redirect_url(payment.provider_ref),
+        "provider_ref": payment.provider_ref,
+        "sandbox": sandbox,
+    }
 
-    if amount != amount.to_integral_value() or amount <= 0:
-        raise FinanceError("Toman amount must be a positive whole number.")
 
-    amount_rial = Decimal(int(amount) * 10)
-    if amount_rial < 1000:
-        raise FinanceError("Amount must be at least 1000 rials (100 toman).")
+def _issue_token(payment: Payment) -> dict:
+    from . import vandar_gateway
 
-    metadata = {"vandar": {"initiated": True, "amount_toman": int(amount)}}
-    if institute is not None:
-        metadata["origin"] = {
-            "institute": institute.slug,
-            "path": return_path or "",
-        }
-    payment = create_payment(
-        user=user,
-        amount=amount_rial,
-        purpose=purpose,
-        provider=Payment.Provider.VANDAR,
-        metadata=metadata,
-    )
     try:
         token_result = vandar_gateway.request_token(
-            amount=amount_rial,
-            factor_number=str(payment.pk),
+            amount=payment.amount,
+            factor_number=str(payment.public_id),
         )
     except vandar_gateway.VandarGatewayError as exc:
-        mark_payment_failed(
-            payment=payment,
-            metadata={
-                "vandar_token_error": str(exc),
-                "vandar_token_error_payload": exc.payload,
-            },
-        )
+        payment.transition(Payment.Status.CANCELED)
+        payment.failure_reason = str(exc)
+        payment.metadata = {
+            **(payment.metadata or {}),
+            "vandar_token_error": str(exc),
+            "vandar_token_error_payload": exc.payload,
+        }
+        payment.save()
+        _event(payment, PaymentEvent.Kind.INITIATE, {"error": str(exc)})
         raise FinanceError(str(exc)) from exc
 
     payment.provider_ref = token_result.token
+    payment.transition(Payment.Status.PENDING)
     payment.metadata = {
         **(payment.metadata or {}),
         "vandar_token": token_result.token,
@@ -313,129 +456,113 @@ def initiate_vandar_payment(
         "vandar_token_response": token_result.response_payload,
         "vandar_sandbox": token_result.sandbox,
     }
-    payment.save(update_fields=["provider_ref", "metadata", "updated_at"])
-    return {
-        "payment": payment,
-        "redirect_url": token_result.redirect_url,
-        "provider_ref": token_result.token,
-        "sandbox": token_result.sandbox,
-    }
-
-
-def _record_vandar_result(meta: dict, result, prefix: str) -> dict:
-    meta[f"{prefix}_request"] = result.request_payload
-    meta[f"{prefix}_response"] = result.response_payload
-    meta[f"{prefix}_message"] = result.message
-    if result.trans_id:
-        meta["vandar_trans_id"] = result.trans_id
-    if result.card_number:
-        meta["vandar_card_number"] = result.card_number
-    return meta
-
-
-def _confirm_vandar(payment: Payment, meta: dict) -> Payment:
-    return confirm_payment(
-        payment=payment,
-        metadata=meta,
-        idempotency_key=f"vandar-confirm:{payment.pk}",
+    payment.save()
+    _event(
+        payment,
+        PaymentEvent.Kind.INITIATE,
+        {"token": token_result.token, "sandbox": token_result.sandbox},
     )
+    return _payment_result(payment, sandbox=token_result.sandbox)
 
 
-@transaction.atomic
-def handle_vandar_callback(*, data: dict) -> Payment:
-    """
-    Process the Vandar return. The row lock serializes duplicate callbacks
-    so the wallet is credited once.
-    """
-    from . import vandar_gateway
+def start_topup(
+    *,
+    user,
+    amount: Decimal,
+    purpose: str = "wallet.topup",
+    institute=None,
+    return_path: str = "/patient/wallet",
+    request_host: str = "",
+) -> dict:
+    """Create a wallet top-up. ``amount`` is toman. This is the only ×10 conversion."""
+    assert_public_purpose(purpose)
+    path = _validate_return_path(return_path)
+    if amount != amount.to_integral_value() or amount <= 0:
+        raise FinanceError("Toman amount must be a positive whole number.")
+    amount_rial = Decimal(int(amount) * 10)
+    if amount_rial < _minimum_rial():
+        raise FinanceError(f"Amount must be at least {_minimum_rial()} rials.")
+    host = resolve_return_host(institute=institute, request_host=request_host)
+    if not path:
+        path = "/patient/wallet" if institute is not None else "/payment/result"
+    with transaction.atomic():
+        payment = Payment.objects.create(
+            user=user,
+            amount=amount_rial,
+            purpose=purpose or "wallet.topup",
+            provider=Payment.Provider.VANDAR,
+            kind=Payment.Kind.TOPUP,
+            status=Payment.Status.CREATED,
+            institute=institute,
+            return_host=host,
+            return_path=path,
+            metadata={"vandar": {"initiated": True, "amount_toman": int(amount)}},
+        )
+    return _issue_token(payment)
 
-    token = _callback_field(data, "token")
-    payment_status = _callback_field(data, "payment_status").upper()
-    if not token:
-        raise FinanceError("Vandar callback missing token.")
 
-    try:
-        payment = (
+def start_checkout(
+    *,
+    user,
+    purpose: str,
+    amount_irr: Decimal,
+    institute,
+    return_path: str,
+    request_host: str = "",
+) -> dict:
+    """Charge ``amount_irr`` for one purpose. Reuses an open checkout for that purpose."""
+    if institute is None:
+        raise FinanceError("Checkout requires an institute.")
+    if not purpose:
+        raise FinanceError("Checkout purpose is required.")
+    path = _validate_return_path(return_path)
+    amount = Decimal(amount_irr)
+    if amount != amount.to_integral_value() or amount <= 0:
+        raise FinanceError("Amount must be a positive whole number of rials.")
+    if amount < _minimum_rial():
+        raise FinanceError(f"Amount must be at least {_minimum_rial()} rials.")
+    host = resolve_return_host(institute=institute, request_host=request_host)
+
+    with transaction.atomic():
+        existing = (
             Payment.objects.select_for_update()
-            .filter(provider=Payment.Provider.VANDAR, provider_ref=token)
-            .get()
+            .filter(
+                purpose=purpose,
+                kind=Payment.Kind.CHECKOUT,
+                status__in=OPEN_CHECKOUT_STATUSES,
+            )
+            .order_by("-id")
+            .first()
         )
-    except Payment.DoesNotExist as exc:
-        raise FinanceError("Unknown Vandar payment (token).") from exc
-
-    meta = {**(payment.metadata or {}), "vandar_callback": dict(data)}
-
-    if payment.status == Payment.Status.SUCCEEDED:
-        payment.metadata = meta
-        payment.save(update_fields=["metadata", "updated_at"])
-        return payment
-
-    if payment.status in (Payment.Status.FAILED, Payment.Status.CANCELED):
-        return payment
-
-    if payment_status == "FAILED":
-        return mark_payment_failed(payment=payment, metadata=meta)
-
-    if payment_status != "OK":
-        return mark_payment_indeterminate(payment=payment, metadata=meta)
-
-    try:
-        verified = vandar_gateway.verify_transaction(
-            token=token,
-            expected_amount=payment.amount,
-        )
-    except vandar_gateway.VandarGatewayError as exc:
-        meta["vandar_verify_error"] = str(exc)
-        meta["vandar_verify_error_payload"] = exc.payload
-        if not exc.indeterminate:
-            return mark_payment_failed(payment=payment, metadata=meta)
-        verified = None
-
-    if verified is not None:
-        meta = _record_vandar_result(meta, verified, "vandar_verify")
-        if verified.success:
-            return _confirm_vandar(payment, meta)
-        if not verified.indeterminate and not verified.confirm_required:
-            return mark_payment_failed(payment=payment, metadata=meta)
-
-    try:
-        inquiry = vandar_gateway.inquire_transaction(
-            token=token,
-            expected_amount=payment.amount,
-        )
-    except vandar_gateway.VandarGatewayError as exc:
-        meta["vandar_inquiry_error"] = str(exc)
-        meta["vandar_inquiry_error_payload"] = exc.payload
-        if exc.indeterminate:
-            return mark_payment_indeterminate(payment=payment, metadata=meta)
-        return mark_payment_failed(payment=payment, metadata=meta)
-
-    meta = _record_vandar_result(meta, inquiry, "vandar_inquiry")
-    if inquiry.success:
-        return _confirm_vandar(payment, meta)
-    if inquiry.indeterminate:
-        return mark_payment_indeterminate(payment=payment, metadata=meta)
-    if not inquiry.confirm_required:
-        return mark_payment_failed(payment=payment, metadata=meta)
-
-    try:
-        retried = vandar_gateway.verify_transaction(
-            token=token,
-            expected_amount=payment.amount,
-        )
-    except vandar_gateway.VandarGatewayError as exc:
-        meta["vandar_verify_retry_error"] = str(exc)
-        meta["vandar_verify_retry_error_payload"] = exc.payload
-        if exc.indeterminate:
-            return mark_payment_indeterminate(payment=payment, metadata=meta)
-        return mark_payment_failed(payment=payment, metadata=meta)
-
-    meta = _record_vandar_result(meta, retried, "vandar_verify_retry")
-    if retried.success:
-        return _confirm_vandar(payment, meta)
-    if retried.indeterminate or retried.confirm_required:
-        return mark_payment_indeterminate(payment=payment, metadata=meta)
-    return mark_payment_failed(payment=payment, metadata=meta)
+        if existing is not None and existing.provider_ref:
+            payment = existing
+            reuse = True
+        elif existing is not None:
+            existing.amount = amount
+            existing.return_host = host
+            existing.return_path = path
+            existing.user = user
+            existing.save(
+                update_fields=["amount", "return_host", "return_path", "user", "updated_at"]
+            )
+            payment = existing
+            reuse = False
+        else:
+            payment = Payment.objects.create(
+                user=user,
+                amount=amount,
+                purpose=purpose,
+                provider=Payment.Provider.VANDAR,
+                kind=Payment.Kind.CHECKOUT,
+                status=Payment.Status.CREATED,
+                institute=institute,
+                return_host=host,
+                return_path=path,
+            )
+            reuse = False
+    if reuse:
+        return _payment_result(payment)
+    return _issue_token(payment)
 
 
 def _callback_field(data: dict, *names: str) -> str:
@@ -443,13 +570,104 @@ def _callback_field(data: dict, *names: str) -> str:
         value = data.get(name)
         if value is not None and str(value).strip() != "":
             return str(value).strip()
-    # case-insensitive fallback
-    lower_map = {str(k).lower(): v for k, v in data.items()}
+    lower_map = {str(key).lower(): value for key, value in data.items()}
     for name in names:
         value = lower_map.get(name.lower())
         if value is not None and str(value).strip() != "":
             return str(value).strip()
     return ""
+
+
+def _reject_verification(payment: Payment, result, *, stage: str) -> Payment | None:
+    """Return a settled payment, or None when the caller should keep asking Vandar."""
+    if result.confirm_required:
+        return None
+    if result.indeterminate:
+        return None
+    if not result.success:
+        _event(payment, stage, {"message": result.message, "amount": str(result.amount or "")})
+        return mark_payment_failed(payment=payment, reason=result.message or "Vandar payment was not successful")
+
+    expected_factor = str(payment.public_id)
+    if result.factor_number != expected_factor:
+        return mark_payment_failed(payment=payment, reason="factor mismatch")
+    if result.amount != payment.amount:
+        return mark_payment_failed(payment=payment, reason="amount mismatch")
+    if not result.trans_id:
+        return mark_payment_failed(payment=payment, reason="missing transaction id")
+    if (
+        Payment.objects.exclude(pk=payment.pk)
+        .filter(trans_id=result.trans_id)
+        .exists()
+    ):
+        return mark_payment_failed(payment=payment, reason="transaction id already used")
+
+    payment.trans_id = result.trans_id
+    payment.card_masked = (result.card_number or "")[:32]
+    payment.verified_at = timezone.now()
+    payment.save(update_fields=["trans_id", "card_masked", "verified_at", "updated_at"])
+    _event(
+        payment,
+        stage,
+        {
+            "trans_id": result.trans_id,
+            "factor_number": result.factor_number,
+            "amount": str(result.amount),
+        },
+    )
+    return confirm_payment(payment=payment)
+
+
+@transaction.atomic
+def handle_vandar_callback(*, data: dict) -> Payment:
+    """Verify a Vandar return. The browser's payment_status is never trusted."""
+    from . import vandar_gateway
+
+    token = _callback_field(data, "token")
+    if not token:
+        raise FinanceError("Vandar callback missing token.")
+    try:
+        payment = (
+            Payment.objects.select_for_update()
+            .select_related("institute")
+            .get(provider=Payment.Provider.VANDAR, provider_ref=token)
+        )
+    except Payment.DoesNotExist as exc:
+        raise FinanceError("Unknown Vandar payment (token).") from exc
+
+    _event(payment, PaymentEvent.Kind.CALLBACK, dict(data))
+    if payment.status in (
+        Payment.Status.SUCCEEDED,
+        Payment.Status.FAILED,
+        Payment.Status.CANCELED,
+    ):
+        return payment
+    if payment.status == Payment.Status.CREATED:
+        payment.transition(Payment.Status.PENDING)
+        payment.save(update_fields=["status", "updated_at"])
+
+    factor = str(payment.public_id)
+
+    def _call(fn, stage: str):
+        try:
+            result = fn(token=token, expected_amount=payment.amount, expected_factor=factor)
+        except vandar_gateway.VandarGatewayError as exc:
+            _event(payment, stage, {"error": str(exc), "indeterminate": exc.indeterminate})
+            if exc.indeterminate:
+                return None
+            return mark_payment_failed(payment=payment, reason=str(exc))
+        return _reject_verification(payment, result, stage=stage)
+
+    settled = _call(vandar_gateway.verify_transaction, PaymentEvent.Kind.VERIFY)
+    if settled is not None:
+        return settled
+    settled = _call(vandar_gateway.inquire_transaction, PaymentEvent.Kind.INQUIRY)
+    if settled is not None:
+        return settled
+    settled = _call(vandar_gateway.verify_transaction, PaymentEvent.Kind.VERIFY)
+    if settled is not None:
+        return settled
+    return mark_payment_indeterminate(payment=payment)
 
 
 @transaction.atomic
@@ -460,6 +678,7 @@ def create_withdrawal(
     bank_details: dict,
     ticket_reference: str = "",
     idempotency_key: str,
+    institute=None,
 ) -> WithdrawalRequest:
     wallet = get_or_create_wallet(user)
     hold = debit_wallet(
@@ -469,6 +688,7 @@ def create_withdrawal(
         idempotency_key=idempotency_key,
         reference=ticket_reference,
         description="Withdrawal hold",
+        institute=institute,
     )
     return WithdrawalRequest.objects.create(
         wallet=wallet,
@@ -477,6 +697,7 @@ def create_withdrawal(
         ticket_reference=ticket_reference,
         status=WithdrawalRequest.Status.PENDING,
         ledger_hold_entry=hold,
+        institute=institute,
     )
 
 
@@ -532,6 +753,7 @@ def reject_withdrawal(
         reference=f"finance.withdrawal:{withdrawal.pk}",
         description=reason or "Withdrawal rejected — funds returned",
         created_by=processed_by,
+        institute=withdrawal.institute,
     )
     withdrawal.status = WithdrawalRequest.Status.REJECTED
     withdrawal.processed_by = processed_by

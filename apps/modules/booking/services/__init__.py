@@ -6,6 +6,7 @@ from .booking import (
     complete_appointment,
     confirm_appointment_payment,
     move_appointment,
+    start_appointment_gateway,
 )
 from .leave import (
     LeaveError,

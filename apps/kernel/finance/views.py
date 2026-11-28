@@ -4,13 +4,13 @@ from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from . import services
 from .models import LedgerEntry, Payment, WithdrawalRequest
 from .serializers import (
     ConfirmPaymentSerializer,
-    CreatePaymentSerializer,
     CreateWithdrawalSerializer,
     LedgerEntrySerializer,
     PaymentSerializer,
@@ -27,6 +27,40 @@ class IsPlatformFinance(BasePermission):
     def has_permission(self, request, view):
         user = request.user
         return bool(user and user.is_authenticated and user.has_perm("finance.manage_platform_finance"))
+
+
+class FinanceSummaryView(APIView):
+    """Institute admins see their host. Platform finance sees every institute."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        from django.utils.dateparse import parse_date
+
+        from apps.kernel.tenancy.hosts import describe_host
+        from apps.kernel.tenancy.models import Institute
+        from apps.kernel.tenancy.services import is_institute_admin
+
+        from .reports import institute_summary, platform_summary
+
+        today = timezone.localdate()
+        date_from = parse_date(request.query_params.get("from") or "") or today - timedelta(days=30)
+        date_to = parse_date(request.query_params.get("to") or "") or today
+        binding = getattr(request, "tenancy_host", None) or describe_host(request.get_host())
+        if binding.kind == "institute" and binding.slug:
+            institute = Institute.objects.filter(slug=binding.slug, is_active=True).first()
+            if institute is None or not (
+                is_institute_admin(request.user, institute.slug)
+                or IsPlatformFinance().has_permission(request, self)
+            ):
+                return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(institute_summary(institute, date_from, date_to))
+        if not IsPlatformFinance().has_permission(request, self):
+            return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
+        return Response(platform_summary(date_from, date_to))
 
 
 class WalletView(APIView):
@@ -67,9 +101,11 @@ class LedgerListView(APIView):
         )
 
 
-class PaymentViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class PaymentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = PaymentSerializer
+    lookup_field = "public_id"
+    lookup_value_regex = "[0-9a-fA-F-]{32,36}"
 
     def get_queryset(self):
         qs = Payment.objects.filter(user=self.request.user)
@@ -77,28 +113,14 @@ class PaymentViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.Retr
             qs = Payment.objects.all()
         return qs.order_by("-created_at")
 
-    def create(self, request, *args, **kwargs):
-        ser = CreatePaymentSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        try:
-            services.assert_public_purpose(ser.validated_data.get("purpose", ""))
-        except services.FinanceError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        payment = services.create_payment(
-            user=request.user,
-            amount=ser.validated_data["amount"],
-            purpose=ser.validated_data.get("purpose", ""),
-            provider=ser.validated_data.get("provider", Payment.Provider.VANDAR),
-            metadata=ser.validated_data.get("metadata"),
-        )
-        return Response(PaymentSerializer(payment).data, status=status.HTTP_201_CREATED)
-
     @action(detail=True, methods=["post"], permission_classes=[IsPlatformFinance])
-    def confirm(self, request, pk=None):
-        try:
-            payment = Payment.objects.get(pk=pk)
-        except Payment.DoesNotExist:
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    def confirm(self, request, public_id=None):
+        payment = self.get_object()
+        if payment.provider != Payment.Provider.MANUAL:
+            return Response(
+                {"detail": "Only a manual payment can be confirmed here."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         ser = ConfirmPaymentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         try:
@@ -178,19 +200,23 @@ class WithdrawalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, mixins.R
 
 
 class VandarInitiateView(APIView):
-    """Authenticated: create a pending Vandar payment and return the redirect URL."""
+    """Authenticated wallet top-up. Checkout goes through each module."""
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = VandarInitiateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        institute = _institute_from_request(request)
+        return_path = "/patient/wallet" if institute is not None else "/payment/result"
         try:
-            services.assert_public_purpose(ser.validated_data.get("purpose", ""))
-            result = services.initiate_vandar_payment(
+            result = services.start_topup(
                 user=request.user,
                 amount=ser.validated_data["amount"],
-                purpose=ser.validated_data.get("purpose", ""),
+                purpose=ser.validated_data.get("purpose") or "wallet.topup",
+                institute=institute,
+                return_path=return_path,
+                request_host=request.get_host(),
             )
         except services.FinanceError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -207,10 +233,12 @@ class VandarInitiateView(APIView):
 
 
 class VandarCallbackView(APIView):
-    """Public Vandar return URL. Redirects the browser to the frontend."""
+    """Public Vandar return URL. Redirects the browser and reveals no error detail."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "vandar_callback"
 
     def get(self, request):
         return self._handle(request.query_params.dict())
@@ -225,49 +253,81 @@ class VandarCallbackView(APIView):
         return self._handle(data)
 
     def _handle(self, data: dict):
-        failure_base = settings.VANDAR_FRONTEND_FAILURE_URL
         try:
             payment = services.handle_vandar_callback(data=data)
         except services.FinanceError:
-            return redirect(failure_base)
+            return redirect(_unknown_token_return())
+        return redirect(build_return_url(payment, _return_status(payment)))
 
-        return redirect(_frontend_return(payment, success=payment.status == Payment.Status.SUCCEEDED))
+
+def _return_status(payment: Payment) -> str:
+    if payment.status == Payment.Status.SUCCEEDED:
+        return "success"
+    if payment.status in (Payment.Status.FAILED, Payment.Status.CANCELED):
+        return "failed"
+    return "pending"
 
 
-def _frontend_return(payment, *, success: bool) -> str:
-    """Send the payer back to the institute that started the payment.
+def _platform_origin() -> str:
+    return (getattr(settings, "PLATFORM_FRONTEND_ORIGIN", "") or "").rstrip("/")
 
-    A missing origin, or the psychology institute, keeps the existing wallet pages.
-    """
-    origin = (payment.metadata or {}).get("origin") or {}
-    slug = origin.get("institute") or ""
-    path = origin.get("path") or ""
-    if not slug or slug == "psy":
-        base = (
-            settings.VANDAR_FRONTEND_SUCCESS_URL
-            if success
-            else settings.VANDAR_FRONTEND_FAILURE_URL
+
+def _unknown_token_return() -> str:
+    origin = _platform_origin()
+    if not origin:
+        return "/payment/result?status=failed"
+    return f"{origin}/payment/result?status=failed"
+
+
+def build_return_url(payment: Payment, status: str) -> str:
+    """https://host[/i/slug]/path?payment_id=<public_id>&status=..."""
+    from apps.kernel.tenancy.models import Institute, InstituteDomain
+
+    host = (payment.return_host or "").lower()
+    path = payment.return_path or "/payment/result"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    query = f"payment_id={payment.public_id}&status={status}"
+    if host:
+        prefix = ""
+        if payment.institute_id:
+            owns = InstituteDomain.objects.filter(
+                institute_id=payment.institute_id,
+                hostname=host,
+                is_active=True,
+            ).exists()
+            if not owns:
+                prefix = f"/i/{payment.institute.slug}"
+        return f"https://{host}{prefix}{path}?{query}"
+
+    origin = _platform_origin()
+    if payment.institute_id:
+        institute = payment.institute
+        canonical = (
+            InstituteDomain.objects.filter(
+                institute_id=institute.id,
+                is_active=True,
+                is_canonical=True,
+            )
+            .order_by("id")
+            .first()
         )
-        joiner = "&" if "?" in base else "?"
-        url = f"{base}{joiner}payment_id={payment.pk}"
-        purpose = payment.purpose or ""
-        if any(purpose.startswith(prefix) for prefix in services.SHOP_ORDER_PURPOSE_PREFIXES):
-            url += "&source=shop"
-        return url
-    status = "success" if success else "failed"
-    suffix = path if path.startswith("/") else f"/{path}" if path else ""
-    return f"{_institute_return_base(slug)}{suffix}?payment_id={payment.pk}&status={status}"
+        if canonical is not None:
+            return f"https://{canonical.hostname}{path}?{query}"
+        # Only a real origin may carry /i/<slug>. An empty
+        # PLATFORM_FRONTEND_ORIGIN must not become a hostless redirect.
+        if origin and institute.frontend_mode == Institute.FrontendMode.STANDARD:
+            return f"{origin}/i/{institute.slug}{path}?{query}"
+    if origin:
+        return f"{origin}{path}?{query}"
+    return f"{path}?{query}"
 
 
-def _institute_return_base(slug: str) -> str:
-    from apps.kernel.tenancy.models import InstituteDomain
+def _institute_from_request(request):
+    from apps.kernel.tenancy.hosts import describe_host
+    from apps.kernel.tenancy.models import Institute
 
-    domain = (
-        InstituteDomain.objects.filter(institute__slug=slug, is_active=True, is_canonical=True)
-        .order_by("id")
-        .first()
-    )
-    if domain is not None:
-        return f"https://{domain.hostname}"
-    origin = (getattr(settings, "PLATFORM_FRONTEND_ORIGIN", "") or "").rstrip("/")
-    return f"{origin}/i/{slug}"
+    binding = getattr(request, "tenancy_host", None) or describe_host(request.get_host())
+    if binding.kind != "institute" or not binding.slug:
+        return None
+    return Institute.objects.filter(slug=binding.slug, is_active=True).first()

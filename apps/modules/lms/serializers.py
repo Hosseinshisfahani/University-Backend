@@ -311,8 +311,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 
 
 class ConfirmEnrollmentSerializer(serializers.Serializer):
-    payment_ref = serializers.CharField(max_length=64)
-    idempotency_key = serializers.CharField(max_length=64)
+    payment_ref = serializers.CharField(max_length=64, required=False, default="wallet")
 
 
 class CancelEnrollmentSerializer(serializers.Serializer):

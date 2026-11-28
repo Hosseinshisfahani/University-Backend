@@ -56,6 +56,7 @@ from .services import (
     cancel_leave_request,
     complete_appointment,
     confirm_appointment_payment,
+    start_appointment_gateway,
     create_open_slot,
     delete_open_slot,
     move_appointment,
@@ -685,9 +686,26 @@ class AppointmentDetailView(InstituteScopedMixin, APIView):
                 ser.is_valid(raise_exception=True)
                 appointment = confirm_appointment_payment(
                     appointment=appointment,
-                    payment_ref=ser.validated_data["payment_ref"],
-                    idempotency_key=ser.validated_data["idempotency_key"],
+                    payment_ref=ser.validated_data.get("payment_ref") or "wallet",
                     allow_offline=IsBookingAdmin().has_permission(request, self),
+                )
+            elif action == "pay_gateway":
+                if appointment.customer_id != request.user.id and not IsBookingAdmin().has_permission(
+                    request, self
+                ):
+                    return _detail("Not allowed.", 403)
+                result = start_appointment_gateway(
+                    appointment=appointment,
+                    request_host=request.get_host(),
+                )
+                return Response(
+                    {
+                        "redirect_url": result["redirect_url"],
+                        "provider_ref": result["provider_ref"],
+                        "sandbox": result["sandbox"],
+                        "payment_id": str(result["payment"].public_id),
+                    },
+                    status=201,
                 )
             elif action == "cancel":
                 ser = CancelSerializer(data=request.data)

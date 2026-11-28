@@ -4,7 +4,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from apps.institutes.psy_institute.models import BlogPost
+from apps.modules.content.models import Post
 from apps.kernel.tenancy.models import Institute
 from apps.kernel.tenancy.registry import validate_enabled_modules
 from apps.kernel.tenancy.services import TenancyError, grant_psy_role, grant_roles, is_institute_admin
@@ -43,7 +43,13 @@ class MembershipTests(TestCase):
         institute = Institute.objects.get(slug="psy")
         institute.enabled_modules = ["reviews", "forms", "shop", "lms", "booking"]
         institute.save(update_fields=["enabled_modules"])
-        BlogPost.objects.create(title="t", slug="t", body="b")
+        Post.objects.create(
+            institute=institute,
+            title="t",
+            slug="t",
+            body="b",
+            is_published=True,
+        )
         response = self.client.get("/api/v1/psy/blog/")
         self.assertEqual(response.status_code, 404)
 

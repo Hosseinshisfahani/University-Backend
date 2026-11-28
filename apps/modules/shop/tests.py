@@ -226,7 +226,10 @@ class ShopModuleTests(TestCase):
             user=self.member,
             amount=Decimal("3000"),
             purpose=f"shop.order:{gateway_order['id']}",
+            institute=self.family,
         )
+        payment.kind = Payment.Kind.CHECKOUT
+        payment.save(update_fields=["kind", "institute"])
         confirm_payment(payment=payment, provider_ref="shop-gateway")
         self.assertEqual(
             Order.objects.get(pk=gateway_order["id"]).status,
@@ -239,8 +242,11 @@ class ShopModuleTests(TestCase):
         legacy_payment = create_payment(
             user=self.member,
             amount=Decimal("3000"),
-            purpose=f"psy.order:{legacy_order['id']}",
+            purpose=f"shop.order:{legacy_order['id']}",
+            institute=self.psy,
         )
+        legacy_payment.kind = Payment.Kind.CHECKOUT
+        legacy_payment.save(update_fields=["kind", "institute"])
         confirm_payment(payment=legacy_payment, provider_ref="psy-gateway")
         self.assertEqual(
             Order.objects.get(pk=legacy_order["id"]).status,

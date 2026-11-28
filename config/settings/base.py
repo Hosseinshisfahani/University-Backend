@@ -158,6 +158,9 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_RATES": {
+        "vandar_callback": "60/min",
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -237,10 +240,11 @@ PSY_SHOP_SHIPPING_FEE = env.int("PSY_SHOP_SHIPPING_FEE", default=0)
 # Callback and browser return URLs come only from the environment so staging,
 # QA, and tunnels can set their own hosts without a code change.
 VANDAR_SANDBOX_MODE = env.bool("VANDAR_SANDBOX_MODE", default=True)
+VANDAR_ALLOW_SANDBOX = env.bool("VANDAR_ALLOW_SANDBOX", default=False)
 VANDAR_API_KEY = env("VANDAR_API_KEY", default="")
 VANDAR_CALLBACK_URL = env("VANDAR_CALLBACK_URL", default="")
-VANDAR_FRONTEND_SUCCESS_URL = env("VANDAR_FRONTEND_SUCCESS_URL", default="")
-VANDAR_FRONTEND_FAILURE_URL = env("VANDAR_FRONTEND_FAILURE_URL", default="")
+# Vandar IPG rejects charges under this many rials. 1000 is their published minimum.
+VANDAR_MIN_AMOUNT_IRR = env.int("VANDAR_MIN_AMOUNT_IRR", default=1000)
 # Shared frontend used when an institute has no canonical domain.
 PLATFORM_FRONTEND_ORIGIN = env("PLATFORM_FRONTEND_ORIGIN", default="")
 VANDAR_SEND_URL = env(

@@ -10,7 +10,8 @@ class PsyInstituteConfig(AppConfig):
     def ready(self) -> None:
         from apps.kernel.tenancy.services import register_institute_adapter
 
-        from .module_adapters import PsyAdapter
+        from . import checks  # noqa: F401
         from . import signals  # noqa: F401
+        from .module_adapters import PsyAdapter
 
         register_institute_adapter("psy", PsyAdapter())

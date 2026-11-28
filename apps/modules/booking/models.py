@@ -98,9 +98,14 @@ class ServiceType(BookingModel):
 
     class Meta:
         ordering = ["sort_order", "name"]
+        verbose_name = "نوع جلسه"
+        verbose_name_plural = "انواع جلسه"
         constraints = [
             models.UniqueConstraint(fields=["institute", "slug"], name="uniq_booking_service_slug"),
         ]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class Provider(BookingModel):
@@ -131,6 +136,8 @@ class ProviderServiceOffer(BookingModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        verbose_name = "خدمات ارائه‌دهنده"
+        verbose_name_plural = "خدمات ارائه‌دهندگان"
         constraints = [
             models.UniqueConstraint(
                 fields=["provider", "service_type"],
@@ -163,6 +170,8 @@ class ProviderAvailability(BookingModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        verbose_name = "زمان‌بندی"
+        verbose_name_plural = "زمان‌بندی‌ها"
         constraints = [
             models.CheckConstraint(
                 condition=Q(end_time__gt=F("start_time")),
@@ -193,6 +202,8 @@ class AvailabilityException(BookingModel):
     reason = models.CharField(max_length=255, blank=True)
 
     class Meta:
+        verbose_name = "استثنای زمان‌بندی"
+        verbose_name_plural = "استثناهای زمان‌بندی"
         constraints = [
             models.UniqueConstraint(
                 fields=["provider", "date", "start_time", "end_time"],
@@ -236,6 +247,8 @@ class LeaveRequest(BookingModel):
 
     class Meta:
         ordering = ["-created_at"]
+        verbose_name = "درخواست مرخصی"
+        verbose_name_plural = "درخواست‌های مرخصی"
         constraints = [
             models.CheckConstraint(
                 condition=Q(ends_on__gte=F("starts_on")),
@@ -276,6 +289,8 @@ class Slot(BookingModel):
 
     class Meta:
         ordering = ["starts_at"]
+        verbose_name = "بازه نوبت"
+        verbose_name_plural = "بازه‌های نوبت"
         constraints = [
             models.CheckConstraint(
                 condition=Q(ends_at__gt=F("starts_at")),
@@ -334,6 +349,7 @@ class Appointment(BookingModel):
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING_PAYMENT, db_index=True)
     price_snapshot = models.DecimalField(max_digits=12, decimal_places=0)
     payment_ref = models.CharField(max_length=64, blank=True)
+    gateway_payment_id = models.PositiveIntegerField(null=True, blank=True)
     deposit_ledger_ref = models.CharField(max_length=64, blank=True)
     canceled_at = models.DateTimeField(null=True, blank=True)
     cancellation_reason = models.TextField(blank=True)
@@ -343,6 +359,8 @@ class Appointment(BookingModel):
 
     class Meta:
         ordering = ["-starts_at"]
+        verbose_name = "نوبت"
+        verbose_name_plural = "نوبت‌ها"
 
     def save(self, *args, **kwargs):
         if self.provider_id and not self.institute_id:

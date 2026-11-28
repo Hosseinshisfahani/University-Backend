@@ -476,8 +476,7 @@ class BookAppointmentSerializer(serializers.Serializer):
 
 
 class ConfirmAppointmentSerializer(serializers.Serializer):
-    payment_ref = serializers.CharField(max_length=64)
-    idempotency_key = serializers.CharField(max_length=64)
+    payment_ref = serializers.CharField(max_length=64, required=False, default="wallet")
 
 
 class CancelAppointmentSerializer(serializers.Serializer):
@@ -761,7 +760,6 @@ class CreateTicketSerializer(serializers.Serializer):
     withdrawal_amount = serializers.DecimalField(
         max_digits=12, decimal_places=0, required=False, min_value=1
     )
-    idempotency_key = serializers.CharField(max_length=64, required=False)
 
 
 class RegenerateSlotsSerializer(serializers.Serializer):

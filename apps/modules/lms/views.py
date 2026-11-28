@@ -120,12 +120,42 @@ class CourseViewSet(InstituteScopedMixin, viewsets.ModelViewSet):
         try:
             enrollment = services.confirm_enrollment(
                 enrollment=enrollment,
-                payment_ref=ser.validated_data["payment_ref"],
-                idempotency_key=ser.validated_data["idempotency_key"],
+                payment_ref=ser.validated_data.get("payment_ref") or "wallet",
             )
         except services.CourseError as exc:
             return _course_error(exc)
         return Response(EnrollmentSerializer(enrollment).data)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"enrollments/(?P<enrollment_id>[^/.]+)/gateway",
+        permission_classes=[IsAuthenticated, HasMemberRole],
+    )
+    def pay_gateway(self, request, slug=None, enrollment_id=None, **kwargs):
+        course = self.get_object()
+        enrollment = get_object_or_404(
+            Enrollment,
+            pk=enrollment_id,
+            workshop=course,
+            user=request.user,
+        )
+        try:
+            result = services.start_enrollment_gateway(
+                enrollment=enrollment,
+                request_host=request.get_host(),
+            )
+        except services.CourseError as exc:
+            return _course_error(exc)
+        return Response(
+            {
+                "redirect_url": result["redirect_url"],
+                "provider_ref": result["provider_ref"],
+                "sandbox": result["sandbox"],
+                "payment_id": str(result["payment"].public_id),
+            },
+            status=201,
+        )
 
     @action(
         detail=True,

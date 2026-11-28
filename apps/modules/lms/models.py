@@ -37,9 +37,14 @@ class Course(InstituteScopedModel):
 
     class Meta:
         ordering = ["-starts_at", "title"]
+        verbose_name = "دوره"
+        verbose_name_plural = "دوره‌ها"
         constraints = [
             models.UniqueConstraint(fields=["institute", "slug"], name="uniq_lms_course_slug"),
         ]
+
+    def __str__(self) -> str:
+        return self.title
 
 
 class Enrollment(InstituteScopedModel):
@@ -59,6 +64,7 @@ class Enrollment(InstituteScopedModel):
     price_snapshot = models.DecimalField(max_digits=12, decimal_places=0, default=0)
     hold_expires_at = models.DateTimeField(null=True, blank=True)
     payment_ref = models.CharField(max_length=64, blank=True)
+    gateway_payment_id = models.PositiveIntegerField(null=True, blank=True)
     deposit_ledger_ref = models.CharField(max_length=64, blank=True)
     refund_ledger_ref = models.CharField(max_length=64, blank=True)
     canceled_at = models.DateTimeField(null=True, blank=True)
@@ -70,6 +76,11 @@ class Enrollment(InstituteScopedModel):
             models.UniqueConstraint(fields=["workshop", "user"], name="uniq_lms_enrollment_user"),
         ]
         ordering = ["-enrolled_at"]
+        verbose_name = "ثبت‌نام دوره"
+        verbose_name_plural = "ثبت‌نام‌های دوره"
+
+    def __str__(self) -> str:
+        return f"{self.user_id} @ {self.workshop_id}"
 
     def save(self, *args, **kwargs):
         if self.workshop_id and not self.institute_id:
@@ -89,6 +100,11 @@ class CourseSession(InstituteScopedModel):
 
     class Meta:
         ordering = ["sort_order", "id"]
+        verbose_name = "جلسه دوره"
+        verbose_name_plural = "جلسه‌های دوره"
+
+    def __str__(self) -> str:
+        return self.title
 
     def save(self, *args, **kwargs):
         if self.workshop_id and not self.institute_id:
@@ -117,6 +133,11 @@ class CourseResource(InstituteScopedModel):
 
     class Meta:
         ordering = ["sort_order", "id"]
+        verbose_name = "منبع دوره"
+        verbose_name_plural = "منابع دوره"
+
+    def __str__(self) -> str:
+        return self.title
 
     def save(self, *args, **kwargs):
         if self.workshop_id and not self.institute_id:
@@ -133,6 +154,11 @@ class SessionProgress(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["enrollment", "session"], name="uniq_lms_progress"),
         ]
+        verbose_name = "پیشرفت جلسه"
+        verbose_name_plural = "پیشرفت جلسه‌ها"
+
+    def __str__(self) -> str:
+        return f"{self.enrollment_id}:{self.session_id}"
 
 
 class Certificate(models.Model):
@@ -145,3 +171,10 @@ class Certificate(models.Model):
         null=True,
         blank=True,
     )
+
+    class Meta:
+        verbose_name = "گواهی دوره"
+        verbose_name_plural = "گواهی‌های دوره"
+
+    def __str__(self) -> str:
+        return self.certificate_code

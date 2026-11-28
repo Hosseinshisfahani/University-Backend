@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.institutes.psy_institute.legacy import allow_legacy_table_writes
 from apps.institutes.psy_institute.models import BlogPost
 from apps.modules.content.models import Post
 from apps.kernel.tenancy.models import Institute
@@ -98,12 +99,13 @@ class ContentCopyMigrationTests(TestCase):
             "apps.modules.content.migrations.0002_copy_psy_content"
         )
 
-        old = BlogPost.objects.create(
-            title="قدیم",
-            slug="legacy-copy",
-            body="متن",
-            cover_image="psy/blog/kept.jpg",
-        )
+        with allow_legacy_table_writes():
+            old = BlogPost.objects.create(
+                title="قدیم",
+                slug="legacy-copy",
+                body="متن",
+                cover_image="psy/blog/kept.jpg",
+            )
         migration._copy(apps, None)
         copied = Post.objects.get(pk=old.pk)
         self.assertEqual(copied.institute.slug, "psy")

@@ -185,10 +185,6 @@ class CheckoutSerializer(serializers.Serializer):
     postal_code = serializers.CharField(required=False, allow_blank=True, default="")
 
 
-class PayOrderSerializer(serializers.Serializer):
-    idempotency_key = serializers.CharField(max_length=64)
-
-
 class CancelOrderSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, default="")
 

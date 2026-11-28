@@ -73,3 +73,5 @@ class Response(InstituteScopedModel):
 
     class Meta:
         ordering = ["-submitted_at"]
+        verbose_name = "پاسخ فرم"
+        verbose_name_plural = "پاسخ‌های فرم"

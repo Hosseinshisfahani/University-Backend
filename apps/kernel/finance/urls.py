@@ -10,6 +10,7 @@ router.register("payments", views.PaymentViewSet, basename="payment")
 router.register("withdrawals", views.WithdrawalViewSet, basename="withdrawal")
 
 urlpatterns = [
+    path("reports/summary/", views.FinanceSummaryView.as_view(), name="report-summary"),
     path("wallet/", views.WalletView.as_view(), name="wallet"),
     path("wallet/ledger/", views.LedgerListView.as_view(), name="ledger"),
     path("vandar/initiate/", views.VandarInitiateView.as_view(), name="vandar-initiate"),

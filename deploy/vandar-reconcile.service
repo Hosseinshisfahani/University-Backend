@@ -1,0 +1,7 @@
+[Unit]
+Description=Reconcile stuck Vandar payments
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/www/university
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --env-file compose.env run --rm --no-deps backend python manage.py reconcile_vandar_payments

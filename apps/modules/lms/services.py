@@ -21,6 +21,7 @@ from .models import Certificate, Course, CourseSession, Enrollment, SessionProgr
 from .signals import certificate_issued, enrollment_cancelled, enrollment_confirmed
 
 HOLD_MINUTES = 15
+GATEWAY_HOLD_MINUTES = 60
 CANCEL_FULL_REFUND_HOURS = 24
 
 
@@ -119,7 +120,7 @@ def enroll(*, course: Course, user) -> Enrollment:
 
 
 @transaction.atomic
-def confirm_enrollment(*, enrollment: Enrollment, payment_ref: str, idempotency_key: str) -> Enrollment:
+def confirm_enrollment(*, enrollment: Enrollment, payment_ref: str, source: str = "wallet") -> Enrollment:
     enrollment = (
         Enrollment.objects.select_for_update()
         .select_related("user", "workshop", "workshop__institute")
@@ -143,32 +144,34 @@ def confirm_enrollment(*, enrollment: Enrollment, payment_ref: str, idempotency_
         enrollment_confirmed.send(sender=Enrollment, enrollment=enrollment)
         return enrollment
 
-    try:
-        entry = finance_services.debit_wallet(
-            user=enrollment.user,
-            amount=amount,
-            entry_type=LedgerEntry.EntryType.WORKSHOP_PURCHASE,
-            idempotency_key=idempotency_key,
-            reference=f"lms.course:{course.pk}",
-            description=course.title,
-            institute=course.institute,
-        )
-    except finance_services.InsufficientFunds as exc:
-        wallet = finance_services.get_or_create_wallet(enrollment.user)
-        raise CourseError(
-            str(exc),
-            code="insufficient_funds",
-            extra={
-                "required": str(amount),
-                "balance": str(wallet.balance),
-                "shortfall": str(max(Decimal("0"), amount - wallet.balance)),
-            },
-        ) from exc
+    entry = None
+    if source != "gateway":
+        try:
+            entry = finance_services.debit_wallet(
+                user=enrollment.user,
+                amount=amount,
+                entry_type=LedgerEntry.EntryType.WORKSHOP_PURCHASE,
+                idempotency_key=f"lms-pay:{enrollment.pk}",
+                reference=f"lms.course:{course.pk}",
+                description=course.title,
+                institute=course.institute,
+            )
+        except finance_services.InsufficientFunds as exc:
+            wallet = finance_services.get_or_create_wallet(enrollment.user)
+            raise CourseError(
+                str(exc),
+                code="insufficient_funds",
+                extra={
+                    "required": str(amount),
+                    "balance": str(wallet.balance),
+                    "shortfall": str(max(Decimal("0"), amount - wallet.balance)),
+                },
+            ) from exc
 
     enrollment.status = Enrollment.Status.ACTIVE
     enrollment.hold_expires_at = None
     enrollment.payment_ref = payment_ref
-    enrollment.deposit_ledger_ref = f"finance.ledger:{entry.pk}"
+    enrollment.deposit_ledger_ref = f"finance.ledger:{entry.pk}" if entry is not None else ""
     enrollment.save(
         update_fields=[
             "status",
@@ -214,6 +217,11 @@ def cancel_enrollment(*, enrollment: Enrollment, canceled_by: str, reason: str =
 
     refund_ref = ""
     if refund:
+        gateway_payment = None
+        if enrollment.gateway_payment_id:
+            from apps.kernel.finance.models import Payment
+
+            gateway_payment = Payment.objects.filter(pk=enrollment.gateway_payment_id).first()
         entry = finance_services.credit_wallet(
             user=enrollment.user,
             amount=Decimal(enrollment.price_snapshot),
@@ -222,6 +230,7 @@ def cancel_enrollment(*, enrollment: Enrollment, canceled_by: str, reason: str =
             reference=f"lms.course:{course.pk}",
             description="Workshop enrollment refund",
             institute=course.institute,
+            payment=gateway_payment,
         )
         refund_ref = f"finance.ledger:{entry.pk}"
 
@@ -242,6 +251,75 @@ def cancel_enrollment(*, enrollment: Enrollment, canceled_by: str, reason: str =
     )
     enrollment_cancelled.send(sender=Enrollment, enrollment=enrollment)
     return enrollment
+
+
+def start_enrollment_gateway(*, enrollment: Enrollment, request_host: str = "") -> dict:
+    enrollment = (
+        Enrollment.objects.select_for_update()
+        .select_related("user", "workshop", "workshop__institute")
+        .get(pk=enrollment.pk)
+    )
+    now = timezone.now()
+    if enrollment.status == Enrollment.Status.ACTIVE:
+        raise CourseError("Already enrolled.", code="already_enrolled")
+    if enrollment.status != Enrollment.Status.PENDING_PAYMENT:
+        raise CourseError("Enrollment is not awaiting payment.", code="invalid_status")
+    if enrollment.hold_expires_at and enrollment.hold_expires_at <= now:
+        raise CourseError("Hold expired. Please register again.", code="hold_expired")
+    amount = Decimal(enrollment.price_snapshot)
+    if amount <= 0:
+        raise CourseError("This course has no fee.", code="nothing_to_pay")
+    course = enrollment.workshop
+    try:
+        result = finance_services.start_checkout(
+            user=enrollment.user,
+            purpose=f"lms.enrollment:{enrollment.pk}",
+            amount_irr=amount,
+            institute=course.institute,
+            return_path="/patient/workshops",
+            request_host=request_host,
+        )
+    except finance_services.FinanceError as exc:
+        raise CourseError(str(exc), code="gateway_error") from exc
+    enrollment.gateway_payment_id = result["payment"].pk
+    enrollment.hold_expires_at = now + timedelta(minutes=GATEWAY_HOLD_MINUTES)
+    enrollment.save(update_fields=["gateway_payment_id", "hold_expires_at", "updated_at"])
+    return result
+
+
+def fulfill_enrollment_checkout(payment) -> None:
+    from apps.kernel.finance.checkout import CheckoutNotFulfillable
+
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        raise CheckoutNotFulfillable("purpose is not an enrollment")
+    try:
+        enrollment = Enrollment.objects.select_related("workshop").get(pk=int(raw))
+    except Enrollment.DoesNotExist as exc:
+        raise CheckoutNotFulfillable("enrollment is missing") from exc
+    ref = f"finance.payment:{payment.public_id}"
+    if enrollment.status == Enrollment.Status.ACTIVE:
+        if enrollment.payment_ref == ref:
+            return
+        raise CheckoutNotFulfillable("enrollment is already active")
+    if enrollment.user_id != payment.user_id:
+        raise CheckoutNotFulfillable("enrollment does not match the payment")
+    try:
+        confirm_enrollment(enrollment=enrollment, payment_ref=ref, source="gateway")
+    except CourseError as exc:
+        raise CheckoutNotFulfillable(str(exc)) from exc
+    enrollment.gateway_payment_id = payment.pk
+    enrollment.save(update_fields=["gateway_payment_id", "updated_at"])
+
+
+def release_enrollment_checkout(payment) -> None:
+    raw = (payment.purpose or "").split(":", 1)[-1]
+    if not raw.isdigit():
+        return
+    enrollment = Enrollment.objects.filter(pk=int(raw)).first()
+    if enrollment is None or enrollment.status != Enrollment.Status.PENDING_PAYMENT:
+        return
+    cancel_enrollment(enrollment=enrollment, canceled_by="patient", reason="gateway expired")
 
 
 def viewer_has_content_access(*, user, course: Course) -> bool:

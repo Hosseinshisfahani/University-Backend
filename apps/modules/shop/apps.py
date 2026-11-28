@@ -8,4 +8,9 @@ class ShopConfig(AppConfig):
     verbose_name = "فروشگاه"
 
     def ready(self) -> None:
-        from . import signals  # noqa: F401
+        from apps.kernel.finance.checkout import register_checkout
+
+        from .services import fulfill_shop_checkout, release_shop_checkout
+
+        register_checkout("shop.order:", fulfill_shop_checkout, release_shop_checkout)
+        register_checkout("psy.order:", fulfill_shop_checkout, release_shop_checkout)

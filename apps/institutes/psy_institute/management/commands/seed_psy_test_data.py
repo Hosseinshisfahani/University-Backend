@@ -1461,7 +1461,7 @@ class Command(BaseCommand):
     def _seed_news(self, media_paths: dict[str, str]) -> str:
         slides = [
             {
-                "title": "ساعات کار مرکز مشاوره آیه",
+                "title": "ساعات کار مرکز مشاوره شناخت",
                 "body": "مرکز از شنبه تا پنج‌شنبه، ۸ تا ۱۹ پذیرای مراجعان است. برای رزرو جلسه وارد پورتال شوید.",
                 "image": media_paths["psy/news/hours-update.svg"],
                 "link_url": "/register",

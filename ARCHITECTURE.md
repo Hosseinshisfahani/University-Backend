@@ -73,8 +73,8 @@ Modules and the kernel never import an institute. Only `psy_institute` exists to
 ### Transitional state
 
 - Shop, courses, content, booking, and reviews HTTP live in `apps/modules` at `/api/v1/institutes/<slug>/...`. `/api/v1/psy/` keeps thin adapters for one compatibility release. Modules emit signals (`order_paid`, `order_shipped`, `enrollment_confirmed`, and the booking signals). psy listens only when the object belongs to psy, and sends SMS.
-- Kernel tenancy exposes `extend_payload`, `normalize_input`, and `person_name`. A module emits neutral names. psy registers an adapter that adds the legacy psychology keys. Modules do not read therapist or patient profiles.
-- Vandar stays one gateway and one callback. `initiate_vandar_payment` stores the originating institute and return path in payment metadata and does not set `payment.institute`. The callback sends psy, and any payment without an origin, to the existing wallet pages. Every other institute returns to its canonical domain, or `PLATFORM_FRONTEND_ORIGIN/i/<slug>`, plus the stored path.
+- Kernel tenancy exposes `extend_payload`, `normalize_input`, and `person_name`. A module emits neutral names (`provider`, `customer`, `service_type`). Booking still accepts the legacy psychology lookups and payload keys (`therapist`, `patient`, `session_type`): `apps/modules/booking/models.py` rewrites those lookups onto `provider__therapist_profile` and `customer__patient_profile`, and `views.py` keeps `therapist_profile` and `patient_profile` in the compatibility payload. Those profiles stay on the psychology user. Other institutes do not require them.
+- Vandar stays one gateway and one callback. `start_topup` and `start_checkout` store the institute, `return_host`, and `return_path` on the payment. The callback sends a custom frontend (psychology) and any payment without an institute to the stored path. A standard institute returns to its canonical domain, or, when it has none, to `PLATFORM_FRONTEND_ORIGIN/i/<slug>` plus the stored path. An empty `PLATFORM_FRONTEND_ORIGIN` must not turn that case into a hostless `/i/<slug>/...` redirect.
 - Booking roles are institute membership plus a `Provider` row (`IsBookingAdmin`, `IsProvider`, `IsCustomer`). The cancel window reads `institute.settings.booking.cancel_window_hours` (default 24) and `refund_on_late_cancel`.
 - A completed appointment has one `booking.AppointmentReview`. `PsyReviewContext` is still written for the psychology adapter.
 - Legacy `psy_*` groups (dual-write), `groups` on `/auth/me`, and old psy model classes remain for one compatibility release.
@@ -97,9 +97,13 @@ Modules and the kernel never import an institute. Only `psy_institute` exists to
 frontend/
   components/                 # generic primitives only (ThemeToggle, ThemeProvider)
   lib/                        # platform kernel (API client, datetime)
+  modules/                    # shared capabilities (content, shop, lms, forms, booking, reviews)
+  templates/
+    standard/                 # standard institute shell and routes (/i/<slug>)
   features/
     auth/                     # platform login/session (no institute CSS)
     finance/                  # platform wallet/ledger helpers
+    tenancy/                  # institute context, guards, hrefs
     news/                     # university news
     think-tanks/              # university think-tanks
   app/
@@ -196,7 +200,7 @@ To prevent token theft through XSS, cryptographic tokens are **never exposed to 
 2. **Phase 2 — Backend foundation** (done): Django project, split settings, PostgreSQL config, cookie-based JWT auth, custom User model, four domain namespaces.
 3. **Phase 3 — Frontend foundation** (done): React Query + Zustand, feature directories, same-origin API client with `credentials: 'include'`, cookie JWT login page, think-tanks/news feature adapters.
 4. **Phase 4 — Infrastructure**: docker-compose with postgres + backend + frontend, nginx routing `/api/` to the backend, CI jobs for both stacks.
-5. **Later phases**: `psy_institute` + `finance` scaffolded; flesh out SEP gateway, notifications, and frontend portals next. Remaining domains follow as specified.
+5. **Later phases**: `psy_institute` and `finance` are in place. Payments go through the Vandar gateway. Shop, courses (`lms`), content, booking, and reviews HTTP already live in `apps/modules` at `/api/v1/institutes/<slug>/...`. `/api/v1/psy/` keeps thin adapters for one compatibility release. Notifications and further institutes follow.
 
 ## 7. Tenancy (phase 1A)
 

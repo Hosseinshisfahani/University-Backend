@@ -6,3 +6,14 @@ class BookingConfig(AppConfig):
     name = "apps.modules.booking"
     label = "booking"
     verbose_name = "نوبت‌دهی"
+
+    def ready(self) -> None:
+        from apps.kernel.finance.checkout import register_checkout
+
+        from .services.booking import fulfill_appointment_checkout, release_appointment_checkout
+
+        register_checkout(
+            "booking.appointment:",
+            fulfill_appointment_checkout,
+            release_appointment_checkout,
+        )

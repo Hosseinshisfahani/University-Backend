@@ -20,12 +20,12 @@ backend/
       core/                    # TimeStampedModel, API middleware, private media storage, health check
       accounts/                # custom User model + cookie-based JWT auth
       tenancy/                 # institutes, memberships, domains, module registry
-      finance/                 # platform wallet, ledger, payments (SEP), withdrawals (IRR)
+      finance/                 # platform wallet, ledger, payments (Vandar), withdrawals (IRR)
       notifications/           # platform SMS / notifications
     modules/                   # shared tenant-scoped capabilities
       content/ reviews/ forms/ shop/ lms/ booking/
     institutes/
-      psy_institute/           # psychology center (scheduling, tests, workshops, tickets)
+      psy_institute/           # psychology profiles, clinical notes, tests, tickets; thin module adapters
 ```
 
 Three layers: the platform kernel (`kernel/core`, `kernel/accounts`, `kernel/tenancy`, `kernel/finance`, `kernel/notifications`), shared `modules/*`, and `institutes/*`. Modules and the kernel never import an institute. `institutes.psy_institute` is the only institute today.
@@ -57,7 +57,7 @@ Settings default to `config.settings.dev`; production runs with `DJANGO_SETTINGS
 | `POST /api/v1/auth/logout/` | Blacklist refresh token, clear cookies |
 | `GET /api/v1/auth/me/` | Current user profile |
 | `GET /api/v1/auth/csrf/` | Set the CSRF cookie |
-| `GET/POST /api/v1/finance/...` | Wallet, ledger, payments (SEP), withdrawals |
+| `GET/POST /api/v1/finance/...` | Wallet, ledger, payments (Vandar), withdrawals |
 | `GET/POST /api/v1/psy/...` | Psychology institute domain API |
 | `GET /api/v1/docs/` | Swagger UI (OpenAPI schema at `/api/v1/schema/`) |
 

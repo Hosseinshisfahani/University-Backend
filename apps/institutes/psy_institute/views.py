@@ -540,8 +540,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         try:
             appt = services.confirm_appointment_payment(
                 appointment=appt,
-                payment_ref=ser.validated_data["payment_ref"],
-                idempotency_key=ser.validated_data["idempotency_key"],
+                payment_ref=ser.validated_data.get("payment_ref") or "wallet",
             )
         except services.BookingError as exc:
             return _detail(str(exc))
@@ -1054,7 +1053,6 @@ class TicketViewSet(viewsets.GenericViewSet):
             if data["type"] == Ticket.Type.WITHDRAWAL:
                 amount = data.get("withdrawal_amount")
                 bank = data.get("bank_details")
-                key = data.get("idempotency_key") or f"ticket-wd:{ticket.pk}"
                 if not amount or not bank:
                     return _detail("withdrawal_amount and bank_details required.")
                 try:
@@ -1063,7 +1061,8 @@ class TicketViewSet(viewsets.GenericViewSet):
                         amount=amount,
                         bank_details=bank,
                         ticket_reference=f"psy.ticket:{ticket.pk}",
-                        idempotency_key=key,
+                        idempotency_key=f"wd:{request.user.pk}:{ticket.pk}",
+                        institute=ticket.institute,
                     )
                 except finance_services.FinanceError as exc:
                     return _detail(str(exc))

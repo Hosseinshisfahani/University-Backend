@@ -10,7 +10,7 @@ from django.utils.html import format_html
 
 from . import services
 from .forms import WalletAdjustBalanceForm
-from .models import LedgerEntry, Payment, Wallet, WithdrawalRequest
+from .models import LedgerEntry, Payment, PaymentEvent, Wallet, WithdrawalRequest
 
 admin.sites.AdminSite.site_header = "پنل اختصاصی ادمین مرکز مشاوره"
 admin.sites.AdminSite.index_title = "ادیت بخش های مختلف"
@@ -169,9 +169,26 @@ class LedgerEntryAdmin(admin.ModelAdmin):
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "amount", "status", "provider", "created_at")
-    list_filter = ("status", "provider")
-    search_fields = ("provider_ref", "user__username")
+    list_display = ("id", "public_id", "user", "amount", "kind", "status", "provider", "created_at")
+    list_filter = ("status", "provider", "kind", "fulfillment_status")
+    search_fields = ("provider_ref", "trans_id", "user__username")
+    readonly_fields = ("public_id",)
+
+
+@admin.register(PaymentEvent)
+class PaymentEventAdmin(admin.ModelAdmin):
+    list_display = ("id", "payment", "kind", "created_at")
+    list_filter = ("kind",)
+    readonly_fields = ("payment", "kind", "payload", "created_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WithdrawalRequest)
