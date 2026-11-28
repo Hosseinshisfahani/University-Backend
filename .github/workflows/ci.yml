@@ -14,6 +14,9 @@ jobs:
   ci:
     name: Django check
     runs-on: ubuntu-latest
+    env:
+      VANDAR_SANDBOX_MODE: "true"
+      VANDAR_ALLOW_SANDBOX: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +33,9 @@ jobs:
   test:
     name: Django tests
     runs-on: ubuntu-latest
+    env:
+      VANDAR_SANDBOX_MODE: "true"
+      VANDAR_ALLOW_SANDBOX: "true"
     services:
       postgres:
         image: postgres:16
