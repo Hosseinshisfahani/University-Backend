@@ -627,8 +627,10 @@ def handle_vandar_callback(*, data: dict) -> Payment:
     if not token:
         raise FinanceError("Vandar callback missing token.")
     try:
+        # Institute is nullable, so this join is outer. Postgres rejects
+        # FOR UPDATE on that side; lock only the payment row.
         payment = (
-            Payment.objects.select_for_update()
+            Payment.objects.select_for_update(of=("self",))
             .select_related("institute")
             .get(provider=Payment.Provider.VANDAR, provider_ref=token)
         )
